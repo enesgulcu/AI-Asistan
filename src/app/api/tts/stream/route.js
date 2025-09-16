@@ -1,9 +1,6 @@
-import OpenAI from 'openai'
-import voicePresets from '@/config/voice-presets.json'
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
+// ElevenLabs TTS API kullanıyoruz
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY
+const ELEVENLABS_VOICE_ID = 'PdYVUd1CAGSXsTvZZTNn' // Belirtilen voice ID
 
 export async function POST(req) {
   try {
@@ -18,58 +15,62 @@ export async function POST(req) {
 
     const { 
       text, 
-      voice = 'alloy', 
-      model = 'tts-1-hd', // Daha hızlı varsayılan model
-      speed = 1.0,
-      preset = null // Preset adı verilirse onu kullan
+      voice_settings = {
+        stability: 0.5,
+        similarity_boost: 0.5,
+        style: 0.0,
+        use_speaker_boost: true
+      }
     } = requestData
     
     if (!text) {
       return new Response('No text provided', { status: 400 })
     }
 
-    if (!process.env.OPENAI_API_KEY) {
-      console.error('Missing OPENAI_API_KEY')
-      return new Response('Missing OpenAI API key', { status: 500 })
+    if (!ELEVENLABS_API_KEY) {
+      console.error('Missing ELEVENLABS_API_KEY')
+      return new Response('Missing ElevenLabs API key', { status: 500 })
     }
 
-    // Preset varsa onu kullan, yoksa parametreleri kullan
-    let finalVoice = voice
-    let finalSpeed = speed
+    console.log(`ElevenLabs TTS Request: "${text}" with voice ID: ${ELEVENLABS_VOICE_ID}`)
 
-    if (preset && voicePresets.presets[preset]) {
-      const presetConfig = voicePresets.presets[preset]
-      finalVoice = presetConfig.openai_voice
-      finalSpeed = presetConfig.speed
-      console.log(`TTS Preset kullanılıyor: ${preset} (${presetConfig.name})`)
-    }
-
-    console.log(`TTS Request: "${text}" with voice: ${finalVoice}, speed: ${finalSpeed}`)
-
-    const response = await openai.audio.speech.create({
-      model: model,
-      voice: finalVoice, // Preset'ten gelen veya parametre olarak verilen ses
-      input: text,
-      response_format: 'mp3',
-      speed: finalSpeed // Preset'ten gelen veya parametre olarak verilen hız
+    // ElevenLabs API çağrısı
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': ELEVENLABS_API_KEY
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: 'eleven_multilingual_v2',
+        voice_settings: voice_settings
+      })
     })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('ElevenLabs API error:', errorText)
+      return new Response(`ElevenLabs API error: ${errorText}`, { status: response.status })
+    }
 
     const buffer = Buffer.from(await response.arrayBuffer())
     
-    console.log(`TTS Success: Generated ${buffer.length} bytes of audio with voice: ${finalVoice}`)
+    console.log(`ElevenLabs TTS Success: Generated ${buffer.length} bytes of audio with voice ID: ${ELEVENLABS_VOICE_ID}`)
     
     return new Response(buffer, {
       status: 200,
       headers: {
         'Content-Type': 'audio/mpeg',
         'Content-Length': buffer.length.toString(),
-        'X-Voice-Used': finalVoice,
-        'X-Speed-Used': finalSpeed.toString()
+        'X-Voice-ID': ELEVENLABS_VOICE_ID,
+        'X-Provider': 'ElevenLabs'
       }
     })
 
   } catch (error) {
-    console.error('OpenAI TTS error:', error)
+    console.error('ElevenLabs TTS error:', error)
     return new Response(JSON.stringify({ 
       error: 'TTS processing failed', 
       details: error.message 

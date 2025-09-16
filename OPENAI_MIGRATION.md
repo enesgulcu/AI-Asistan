@@ -6,7 +6,7 @@ Proje artık **tüm AI servislerini OpenAI üzerinden** yürütüyor:
 
 - ✅ **STT**: Deepgram → **OpenAI Whisper**
 - ✅ **TTS**: Google Cloud TTS → **OpenAI TTS**  
-- ✅ **Chat**: OpenAI GPT-4o-mini (zaten mevcuttu)
+- ✅ **Chat**: OpenAI GPT-4o (zaten mevcuttu)
 
 ## 🎯 Avantajlar
 
@@ -103,7 +103,7 @@ NEXTAUTH_URL=http://localhost:3000
 
 - **STT**: OpenAI Whisper - Yüksek doğruluk, Türkçe desteği
 - **TTS**: OpenAI TTS - 6 farklı ses seçeneği, doğal konuşma
-- **Chat**: GPT-4o-mini - Hızlı ve akıllı yanıtlar
+- **Chat**: GPT-4o - Hızlı ve akıllı yanıtlar
 
 ## 🔄 Migration Checklist
 

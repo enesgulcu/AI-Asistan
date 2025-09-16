@@ -16,13 +16,27 @@ export default function VoicePanel() {
   const [debugInfo, setDebugInfo] = useState([])
   const [currentStep, setCurrentStep] = useState('')
   const [processSteps, setProcessSteps] = useState([])
-  const [currentPreset, setCurrentPreset] = useState(voicePresets.default_preset)
+  const [currentPreset, setCurrentPreset] = useState('default')
   const [lastResponseAudio, setLastResponseAudio] = useState(null) // Son yanıtın ses dosyası
   const [isReplaying, setIsReplaying] = useState(false) // Tekrar çalma durumu
   const [fullResponseAudios, setFullResponseAudios] = useState([]) // Tüm yanıtın ses parçaları
   const [currentResponseId, setCurrentResponseId] = useState(null) // Mevcut yanıt ID'si
+  const [lastUserSpeechTime, setLastUserSpeechTime] = useState(0) // Son kullanıcı konuşma zamanı
 
   const mediaRecorderRef = useRef(null)
+
+  // Sayfa yenilendiğinde tüm geçmişi temizle
+  useEffect(() => {
+    // Component mount olduğunda tüm state'leri temizle
+    setUserText('')
+    setAssistantText('')
+    setDebugInfo([])
+    setProcessSteps([])
+    setFullResponseAudios([])
+    setLastResponseAudio(null)
+    setCurrentResponseId(null)
+    addDebugInfo('Sayfa yenilendi, tüm geçmiş temizlendi', 'info')
+  }, []) // Sadece component mount olduğunda çalış
   const audioQueueRef = useRef([])
   const isPlayingRef = useRef(false)
   const fileInputRef = useRef(null)
@@ -69,6 +83,16 @@ export default function VoicePanel() {
       isPlayingRef.current = true
       setIsSpeaking(true)
       
+      // AI konuşurken mikrofonu tamamen durdur ve kayıt yapmayı engelle
+      if (isRecording) {
+        stopRecording()
+        addDebugInfo('AI konuşuyor, mikrofon durduruldu', 'info')
+      }
+      
+      // Mouse down durumunu da sıfırla
+      isMouseDownRef.current = false
+      setIsRunning(false)
+      
       const audioBlob = audioQueueRef.current.shift()
       const audioUrl = URL.createObjectURL(audioBlob)
       const audio = new Audio(audioUrl)
@@ -94,10 +118,10 @@ export default function VoicePanel() {
         isPlayingRef.current = false
         setIsSpeaking(false)
         
-        // Kısa bekleme sonra bir sonraki sesi çal
+        // Hemen bir sonraki sesi çal (kesintisiz geçiş)
         setTimeout(() => {
           playNextAudio()
-        }, 200)
+        }, 50)
       }
       
       audio.onerror = (error) => {
@@ -143,15 +167,15 @@ export default function VoicePanel() {
       addProcessStep('TTS: Ses üretiliyor', 'in_progress');
       setStatus('Ses üretiliyor...');
 
-      // Mevcut preset'i al
-      const preset = voicePresets.presets[currentPreset]
+      // ElevenLabs preset'i al
+      const preset = voicePresets.presets['default'] // Sadece default preset kullanıyoruz
       
       const apiStartTime = Date.now()
-      addDetailedDebugInfo(`📡 API ÇAĞRISI BAŞLADI`, 'info', {
+      addDetailedDebugInfo(`📡 ELEVENLABS API ÇAĞRISI BAŞLADI`, 'info', {
         ttsId,
-        voice: preset.openai_voice,
-        speed: preset.speed,
-        model: 'tts-1-hd'
+        voice_id: preset.elevenlabs_voice_id,
+        voice_settings: preset.voice_settings,
+        provider: 'ElevenLabs'
       });
       
       const res = await fetch('/api/tts/stream', {
@@ -159,10 +183,7 @@ export default function VoicePanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           text: text.trim(),
-          voice: preset.openai_voice,
-          model: 'tts-1-hd', // Daha hızlı model
-          speed: preset.speed,
-          preset: currentPreset
+          voice_settings: preset.voice_settings
         }),
       });
 
@@ -235,7 +256,46 @@ export default function VoicePanel() {
 
   // Process chat completion - Fixed TTS order
   const processChat = async (prompt) => {
-    if (!prompt.trim()) return;
+    if (!prompt.trim()) {
+      addDebugInfo('Boş input, yanıt verilmiyor', 'warning');
+      return;
+    }
+
+    // Input validation - sadece gerçek kullanıcı input'u kabul et
+    const trimmedPrompt = prompt.trim();
+    if (trimmedPrompt.length < 2) {
+      addDebugInfo('Çok kısa input, yanıt verilmiyor', 'warning');
+      return;
+    }
+
+    // AI'nin kendi yanıtlarını tekrar işlemesini engelle
+    const aiResponsePatterns = [
+      'Merhaba, ben Selin',
+      'Size nasıl yardımcı olabilirim',
+      'Nasılsınız',
+      'Saç Ekimi Merkezi',
+      'FUE tekniği',
+      'FUT tekniği',
+      'DHI tekniği',
+      'Sapphire FUE',
+      'foliküler ünite',
+      'saç ekimi konusunda',
+      'deneyimliyiz',
+      'başarı hikayesi',
+      'kliniğe yönlendir',
+      'randevu almak',
+      'endüşelenmeyin',
+      'güven verici'
+    ];
+    
+    const isAiResponse = aiResponsePatterns.some(pattern => 
+      trimmedPrompt.toLowerCase().includes(pattern.toLowerCase())
+    );
+    
+    if (isAiResponse) {
+      addDebugInfo('AI kendi yanıtını tekrar işlemeye çalışıyor, engellendi', 'warning');
+      return;
+    }
 
     // Yeni yanıt başladığında önceki ses parçalarını temizle
     const responseId = Date.now().toString()
@@ -431,8 +491,19 @@ export default function VoicePanel() {
         addDebugInfo(`OpenAI Whisper sonucu: ${JSON.stringify(result)}`, 'success')
         
         if (result.text) {
+          const currentTime = Date.now()
+          const timeSinceLastUserSpeech = currentTime - lastUserSpeechTime
+          
+          // Eğer AI konuşuyorsa ve son kullanıcı konuşmasından 5 saniye geçmemişse, bu muhtemelen AI'nin kendi sesi
+          if (isSpeaking && timeSinceLastUserSpeech < 5000) {
+            addDebugInfo('AI konuşurken gelen ses, muhtemelen AI\'nin kendi sesi - yok sayılıyor', 'warning')
+            updateProcessStep('STT: Konuşma işleniyor', 'cancelled');
+            return
+          }
+          
           addDebugInfo(`Metin alındı: "${result.text}"`, 'success')
           setUserText(result.text)
+          setLastUserSpeechTime(currentTime)
           updateProcessStep('STT: Konuşma işleniyor', 'completed');
           addProcessStep('Chat: AI yanıtı alınıyor', 'pending');
           await processChat(result.text)
@@ -568,7 +639,17 @@ export default function VoicePanel() {
 
   // Mouse events for hold-to-record
   const handleMouseDown = () => {
-    if (isProcessing) return;
+    if (isProcessing || isSpeaking) {
+      addDebugInfo('AI konuşuyor, kayıt yapılamıyor', 'warning')
+      return;
+    }
+    
+    // Eğer zaten kayıt yapılıyorsa, yeni kayıt başlatma
+    if (isRecording) {
+      addDebugInfo('Zaten kayıt yapılıyor', 'warning')
+      return;
+    }
+    
     isMouseDownRef.current = true;
     setIsRunning(true);
     startRecording();
@@ -678,21 +759,21 @@ export default function VoicePanel() {
       audio.onended = () => {
         URL.revokeObjectURL(audioUrl)
         currentIndex++
-        // Kısa bekleme sonra bir sonraki parçayı çal
-        setTimeout(playNextPart, 200)
+        // Hemen bir sonraki parçayı çal (kesintisiz geçiş)
+        setTimeout(playNextPart, 50)
       }
       
       audio.onerror = () => {
         URL.revokeObjectURL(audioUrl)
         addDebugInfo(`Parça ${currentIndex + 1} çalma hatası`, 'error')
         currentIndex++
-        setTimeout(playNextPart, 200)
+        setTimeout(playNextPart, 50)
       }
       
       audio.play().catch((error) => {
         addDebugInfo(`Parça ${currentIndex + 1} oynatma hatası: ${error.message}`, 'error')
         currentIndex++
-        setTimeout(playNextPart, 200)
+        setTimeout(playNextPart, 50)
       })
     }
     
@@ -717,12 +798,12 @@ export default function VoicePanel() {
   return (
     <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
       <div className="text-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">OpenAI Sesli Asistan</h2>
-        <p className="text-gray-600">Mikrofonla konuşun, OpenAI GPT + Whisper + TTS ile yanıtlasın</p>
+        <h2 className="text-2xl font-bold text-gray-900 mb-2">ElevenLabs Sesli Asistan</h2>
+        <p className="text-gray-600">Mikrofonla konuşun, OpenAI GPT + Whisper + ElevenLabs TTS ile yanıtlasın</p>
         <div className="mt-2 flex justify-center space-x-2 text-xs text-gray-500">
-          <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">GPT-4o-mini</span>
+          <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">GPT-4o</span>
           <span className="bg-green-100 text-green-800 px-2 py-1 rounded">Whisper STT</span>
-          <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">OpenAI TTS</span>
+          <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">ElevenLabs TTS</span>
         </div>
       </div>
 
@@ -750,34 +831,21 @@ export default function VoicePanel() {
           onClick={testTTS}
           className="px-4 py-2 text-sm bg-purple-100 hover:bg-purple-200 text-purple-800 rounded-lg transition-colors"
         >
-          OpenAI TTS Testi
+          ElevenLabs TTS Testi
         </button>
       </div>
 
-      {/* Preset Seçimi */}
+      {/* ElevenLabs Voice Info */}
       <div className="mb-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-3 text-center">Ses Stili ve Duygu</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          {Object.entries(voicePresets.presets).map(([key, preset]) => (
-            <button
-              key={key}
-              onClick={() => setCurrentPreset(key)}
-              className={`p-3 rounded-lg text-sm font-medium transition-all ${
-                currentPreset === key
-                  ? 'bg-indigo-100 text-indigo-800 border-2 border-indigo-300'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
-              }`}
-            >
-              <div className="text-lg mb-1">{voicePresets.emotion_indicators[preset.emotion]}</div>
-              <div className="font-medium">{preset.name}</div>
-              <div className="text-xs text-gray-500 mt-1">{preset.description}</div>
-            </button>
-          ))}
-        </div>
-        <div className="text-center mt-3">
-          <div className="text-xs text-gray-500">
-            Seçili: <span className="font-medium">{voicePresets.presets[currentPreset].name}</span>
-            <span className="ml-2">{voicePresets.emotion_indicators[voicePresets.presets[currentPreset].emotion]}</span>
+        <h3 className="text-sm font-semibold text-gray-700 mb-3 text-center">ElevenLabs Ses Sistemi</h3>
+        <div className="bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg p-4 border border-purple-200">
+          <div className="text-center">
+            <div className="text-2xl mb-2">🎙️</div>
+            <div className="font-medium text-gray-800">{voicePresets.presets.default.name}</div>
+            <div className="text-sm text-gray-600 mt-1">{voicePresets.presets.default.description}</div>
+            <div className="text-xs text-gray-500 mt-2">
+              Voice ID: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{voicePresets.elevenlabs_config.voice_id}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -810,14 +878,16 @@ export default function VoicePanel() {
               onMouseDown={handleMouseDown}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
-              disabled={isProcessing}
+              disabled={isProcessing || isSpeaking}
               className={`w-24 h-24 rounded-full text-white font-bold text-lg transition-all duration-200 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed select-none ${
                 isRunning 
                   ? 'bg-red-500 hover:bg-red-600 shadow-lg' 
+                  : isSpeaking
+                  ? 'bg-yellow-500 shadow-lg'
                   : 'bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 shadow-lg'
               }`}
             >
-              {isRunning ? '■' : '●'}
+              {isRunning ? '■' : isSpeaking ? '🔊' : '●'}
             </button>
             <p className="mt-2 text-sm text-gray-600">
               {isRunning ? 'Basılı tutun ve konuşun' : 'Basılı tutarak konuşun'}
@@ -870,7 +940,7 @@ export default function VoicePanel() {
               <svg className="w-4 h-4 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
-              Asistan (OpenAI GPT-4o-mini)
+              Asistan (OpenAI GPT-4o)
             </h3>
             {fullResponseAudios.length > 0 && (
               <button
@@ -1002,7 +1072,9 @@ export default function VoicePanel() {
                           {Object.entries(info.details).map(([key, value]) => (
                             <div key={key} className="flex">
                               <span className="text-gray-400 font-mono">{key}:</span>
-                              <span className="ml-1 text-white font-medium">{value}</span>
+                              <span className="ml-1 text-white font-medium">
+                                {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                              </span>
                             </div>
                           ))}
                         </div>

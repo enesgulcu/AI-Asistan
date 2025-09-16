@@ -1,106 +1,40 @@
 {
   "presets": {
-    "sıcak": {
-      "name": "Sıcak ve Samimi",
-      "description": "Yakın ve kişisel bir ton",
-      "openai_voice": "nova",
-      "speed": 1.2,
-      "pitch": 0.1,
-      "emotion": "warm",
-      "style_instructions": "Daha sıcak ve kişisel bir ton kullan, gülümser gibi konuş, doğal duraklamalar yap",
-      "expressions": ["😊", "💕", "✨"]
-    },
-    "resmi": {
-      "name": "Resmi ve Profesyonel",
-      "description": "Ciddi ve profesyonel ton",
-      "openai_voice": "onyx",
-      "speed": 1.1,
-      "pitch": 0.0,
-      "emotion": "professional",
-      "style_instructions": "Resmi ve profesyonel bir ton kullan, ciddi ama saygılı, doğal konuşma ritmi",
-      "expressions": ["🤝", "💼", "📋"]
-    },
-    "neşeli": {
-      "name": "Neşeli ve Enerjik",
-      "description": "Pozitif ve enerjik ton",
-      "openai_voice": "shimmer",
-      "speed": 1.3,
-      "pitch": 0.15,
-      "emotion": "cheerful",
-      "style_instructions": "Neşeli ve enerjik bir ton kullan, pozitif enerji yay, doğal coşku",
-      "expressions": ["🎉", "⚡", "🌟"]
-    },
-    "sakin": {
-      "name": "Sakin ve Huzurlu",
-      "description": "Huzurlu ve sakin ton",
-      "openai_voice": "alloy",
-      "speed": 1.0,
-      "pitch": -0.05,
-      "emotion": "calm",
-      "style_instructions": "Sakin ve huzurlu bir ton kullan, rahatlatıcı ol, yumuşak konuşma",
-      "expressions": ["😌", "🌿", "🕊️"]
-    },
-    "şakacı": {
-      "name": "Eğlenceli ve Şakacı",
-      "description": "Mizahi ve oyuncu ton",
-      "openai_voice": "echo",
-      "speed": 1.1,
-      "pitch": 0.2,
-      "emotion": "playful",
-      "style_instructions": "Eğlenceli ve şakacı bir ton kullan, hafif mizah kat, doğal gülümseme",
-      "expressions": ["😄", "😜", "🎭"]
-    },
-    "motivasyonel": {
-      "name": "Cesaret Verici",
-      "description": "Motivasyonel ve ilham verici",
-      "openai_voice": "fable",
-      "speed": 1.0,
-      "pitch": 0.05,
-      "emotion": "motivational",
-      "style_instructions": "Cesaret verici ve motivasyonel bir ton kullan, ilham ver, güçlü ama doğal",
-      "expressions": ["💪", "🔥", "🚀"]
-    },
-    "empatik": {
-      "name": "Anlayışlı ve Empatik",
-      "description": "Duygusal destek veren ton",
-      "openai_voice": "nova",
-      "speed": 0.95,
-      "pitch": 0.0,
-      "emotion": "empathetic",
-      "style_instructions": "Anlayışlı ve empatik bir ton kullan, duygusal destek ver, sıcak ve samimi",
-      "expressions": ["🤗", "💙", "🫂"]
-    },
-    "bilimsel": {
-      "name": "Analitik ve Bilimsel",
-      "description": "Mantıklı ve detaylı ton",
-      "openai_voice": "onyx",
-      "speed": 0.9,
-      "pitch": -0.1,
-      "emotion": "analytical",
-      "style_instructions": "Analitik ve bilimsel bir ton kullan, detaylı açıkla, net ve anlaşılır",
-      "expressions": ["🔬", "📊", "🧠"]
+    "default": {
+      "name": "Selin - Klinik Temsilcisi",
+      "description": "Sıcak, samimi ve profesyonel telefon karşılama sesi",
+      "elevenlabs_voice_id": "PdYVUd1CAGSXsTvZZTNn",
+      "voice_settings": {
+        "stability": 0.75,
+        "similarity_boost": 0.75,
+        "style": 0.0,
+        "use_speaker_boost": true
+      },
+      "emotion": "warm_professional",
+      "style_instructions": "Sıcak, samimi ve profesyonel telefon karşılama tonu. Doğal konuşma ritmi, müşteri dostu yaklaşım",
+      "expressions": ["😊", "🤝", "💼"]
     }
   },
   
-  "default_preset": "sıcak",
+  "default_preset": "default",
   
-  "voice_mapping": {
-    "alloy": "Nötr, profesyonel",
-    "echo": "Canlı, genç",
-    "fable": "Hikaye anlatıcısı, sıcak",
-    "onyx": "Derin erkek sesi, otoriter",
-    "nova": "Genç kadın sesi, enerjik",
-    "shimmer": "Yumuşak kadın sesi, nazik"
+  "elevenlabs_config": {
+    "voice_id": "PdYVUd1CAGSXsTvZZTNn",
+    "model_id": "eleven_multilingual_v2",
+    "api_url": "https://api.elevenlabs.io/v1/text-to-speech/",
+    "description": "Sıcak, samimi ve profesyonel telefon karşılama sesi - Selin karakteri için optimize edilmiş"
+  },
+  
+  "voice_settings": {
+    "stability": 0.75,
+    "similarity_boost": 0.75,
+    "style": 0.0,
+    "use_speaker_boost": true
   },
   
   "emotion_indicators": {
-    "warm": "😊",
-    "professional": "🤝",
-    "cheerful": "😄",
-    "calm": "😌",
-    "playful": "😜",
-    "motivational": "💪",
-    "empathetic": "🤗",
-    "analytical": "🔬"
+    "warm_professional": "😊",
+    "telephone_friendly": "🤝",
+    "customer_service": "💼"
   }
 }

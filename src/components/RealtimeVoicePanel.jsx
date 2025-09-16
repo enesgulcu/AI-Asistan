@@ -10,10 +10,11 @@ export default function RealtimeVoicePanel() {
   const [isRecording, setIsRecording] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
-  const [currentPreset, setCurrentPreset] = useState(voicePresets.default_preset)
+  const [currentPreset, setCurrentPreset] = useState('default')
   const [conversationHistory, setConversationHistory] = useState([])
   const [debugInfo, setDebugInfo] = useState([])
   const [processSteps, setProcessSteps] = useState([])
+  const [lastUserSpeechTime, setLastUserSpeechTime] = useState(0) // Son kullanıcı konuşma zamanı
 
   // WebRTC referansları
   const peerConnectionRef = useRef(null)
@@ -113,12 +114,24 @@ export default function RealtimeVoicePanel() {
         addDebugInfo(`STT sonucu: "${result.text}"`, 'success')
         
         if (result.text && result.text.trim()) {
+          const currentTime = Date.now()
+          const timeSinceLastUserSpeech = currentTime - lastUserSpeechTime
+          
+          // Eğer AI konuşuyorsa ve son kullanıcı konuşmasından 5 saniye geçmemişse, bu muhtemelen AI'nin kendi sesi
+          if (isSpeaking && timeSinceLastUserSpeech < 5000) {
+            addDebugInfo('AI konuşurken gelen ses, muhtemelen AI\'nin kendi sesi - yok sayılıyor', 'warning')
+            updateProcessStep('STT: Realtime ses işleniyor', 'cancelled');
+            return
+          }
+          
           // Konuşma geçmişine ekleme
           setConversationHistory(prev => [...prev, {
             type: 'user',
             text: result.text,
             timestamp: new Date().toISOString()
           }])
+          
+          setLastUserSpeechTime(currentTime)
 
           // GPT ile işleme
           await processRealtimeChat(result.text)
@@ -140,11 +153,52 @@ export default function RealtimeVoicePanel() {
   // Realtime chat işleme
   const processRealtimeChat = useCallback(async (userMessage) => {
     try {
-      addProcessStep('Chat: Realtime AI yanıtı', 'in_progress')
-      addDebugInfo(`Realtime chat başlatılıyor: "${userMessage}"`, 'info')
+      // Input validation - sadece gerçek kullanıcı input'u kabul et
+      if (!userMessage.trim()) {
+        addDebugInfo('Boş input, yanıt verilmiyor', 'warning');
+        return;
+      }
 
-      // Mevcut preset'i al
-      const preset = voicePresets.presets[currentPreset]
+      const trimmedMessage = userMessage.trim();
+      if (trimmedMessage.length < 2) {
+        addDebugInfo('Çok kısa input, yanıt verilmiyor', 'warning');
+        return;
+      }
+
+      // AI'nin kendi yanıtlarını tekrar işlemesini engelle
+      const aiResponsePatterns = [
+        'Merhaba, ben Selin',
+        'Size nasıl yardımcı olabilirim',
+        'Nasılsınız',
+        'Saç Ekimi Merkezi',
+        'FUE tekniği',
+        'FUT tekniği',
+        'DHI tekniği',
+        'Sapphire FUE',
+        'foliküler ünite',
+        'saç ekimi konusunda',
+        'deneyimliyiz',
+        'başarı hikayesi',
+        'kliniğe yönlendir',
+        'randevu almak',
+        'endüşelenmeyin',
+        'güven verici'
+      ];
+      
+      const isAiResponse = aiResponsePatterns.some(pattern => 
+        trimmedMessage.toLowerCase().includes(pattern.toLowerCase())
+      );
+      
+      if (isAiResponse) {
+        addDebugInfo('AI kendi yanıtını tekrar işlemeye çalışıyor, engellendi', 'warning');
+        return;
+      }
+
+      addProcessStep('Chat: Realtime AI yanıtı', 'in_progress')
+      addDebugInfo(`Realtime chat başlatılıyor: "${trimmedMessage}"`, 'info')
+
+      // ElevenLabs default preset'i al
+      const preset = voicePresets.presets['default']
       
       // GPT config'i preset ile birleştir
       const systemPrompt = `${gptConfig.system_prompt}\n\n${preset.style_instructions}\n\n${gptConfig.voice_guidelines.sentence_structure}`
@@ -153,7 +207,7 @@ export default function RealtimeVoicePanel() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          prompt: userMessage,
+          prompt: trimmedMessage,
           system_prompt: systemPrompt,
           max_tokens: gptConfig.technical_instructions.max_tokens,
           temperature: gptConfig.technical_instructions.temperature
@@ -218,16 +272,14 @@ export default function RealtimeVoicePanel() {
   const processRealtimeTTS = useCallback(async (text, preset) => {
     try {
       addProcessStep('TTS: Realtime ses üretimi', 'in_progress')
-      addDebugInfo(`Realtime TTS başlatılıyor: "${text}"`, 'info')
+      addDebugInfo(`Realtime ElevenLabs TTS başlatılıyor: "${text}"`, 'info')
 
       const response = await fetch('/api/tts/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: text,
-          voice: preset.openai_voice,
-          model: 'tts-1',
-          speed: preset.speed
+          voice_settings: preset.voice_settings
         })
       })
 
@@ -259,6 +311,23 @@ export default function RealtimeVoicePanel() {
     if (audioQueueRef.current.length > 0 && !isPlayingRef.current) {
       isPlayingRef.current = true
       setIsSpeaking(true)
+      
+      // AI konuşurken mikrofonu tamamen durdur ve kayıt yapmayı engelle
+      if (isRecording) {
+        // Kayıt durdur
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop()
+          mediaRecorderRef.current = null
+        }
+        
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach(track => track.stop())
+          localStreamRef.current = null
+        }
+        
+        setIsRecording(false)
+        addDebugInfo('AI konuşuyor, mikrofon durduruldu', 'info')
+      }
 
       const audioBlob = audioQueueRef.current.shift()
       const audioUrl = URL.createObjectURL(audioBlob)
@@ -268,10 +337,10 @@ export default function RealtimeVoicePanel() {
         URL.revokeObjectURL(audioUrl)
         isPlayingRef.current = false
         setIsSpeaking(false)
-        // Bir sonraki sesi çal
+        // Hemen bir sonraki sesi çal (kesintisiz geçiş)
         setTimeout(() => {
           playNextAudio()
-        }, 100)
+        }, 50)
       }
 
       audio.onerror = () => {
@@ -283,7 +352,7 @@ export default function RealtimeVoicePanel() {
 
       audio.play().catch(console.error)
     }
-  }, [])
+  }, [isRecording, addDebugInfo])
 
   // Kayıt başlatma/durdurma
   const toggleRecording = useCallback(async () => {
@@ -302,6 +371,12 @@ export default function RealtimeVoicePanel() {
       setIsRecording(false)
       addDebugInfo('Kayıt durduruldu', 'info')
     } else {
+      // AI konuşuyorsa kayıt yapma
+      if (isSpeaking) {
+        addDebugInfo('AI konuşuyor, kayıt yapılamıyor', 'warning')
+        return
+      }
+      
       // Kayıt başlat
       try {
         addDebugInfo('Kayıt başlatılıyor...', 'info')
@@ -357,21 +432,9 @@ export default function RealtimeVoicePanel() {
         console.error('Recording error:', error)
       }
     }
-  }, [isRecording, addDebugInfo, addProcessStep, updateProcessStep])
+  }, [isRecording, isSpeaking, addDebugInfo, addProcessStep, updateProcessStep])
 
-  // Preset değiştirme
-  const changePreset = useCallback((presetName) => {
-    setCurrentPreset(presetName)
-    addDebugInfo(`Preset değiştirildi: ${presetName}`, 'info')
-    
-    // DataChannel ile uzak tarafa bildir
-    if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
-      dataChannelRef.current.send(JSON.stringify({
-        type: 'change_preset',
-        preset: presetName
-      }))
-    }
-  }, [addDebugInfo])
+  // Artık sadece default preset kullanıyoruz - changePreset fonksiyonu kaldırıldı
 
   // Bağlantıyı kapatma
   const disconnect = useCallback(() => {
@@ -391,14 +454,20 @@ export default function RealtimeVoicePanel() {
     addDebugInfo('Bağlantı kapatıldı', 'info')
   }, [addDebugInfo])
 
-  // Component mount olduğunda bağlantıyı başlat
+  // Component mount olduğunda bağlantıyı başlat ve geçmişi temizle
   useEffect(() => {
+    // Sayfa yenilendiğinde tüm geçmişi temizle
+    setConversationHistory([])
+    setDebugInfo([])
+    setProcessSteps([])
+    addDebugInfo('Sayfa yenilendi, tüm geçmiş temizlendi', 'info')
+    
     initializeConnection()
     
     return () => {
       disconnect()
     }
-  }, [initializeConnection, disconnect])
+  }, [initializeConnection, disconnect, addDebugInfo])
 
   return (
     <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
@@ -425,24 +494,18 @@ export default function RealtimeVoicePanel() {
         </div>
       </div>
 
-      {/* Preset Seçimi */}
+      {/* ElevenLabs Voice Info */}
       <div className="mb-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-3">Ses Stili</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          {Object.entries(voicePresets.presets).map(([key, preset]) => (
-            <button
-              key={key}
-              onClick={() => changePreset(key)}
-              className={`p-3 rounded-lg text-sm font-medium transition-all ${
-                currentPreset === key
-                  ? 'bg-indigo-100 text-indigo-800 border-2 border-indigo-300'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
-              }`}
-            >
-              <div className="text-lg mb-1">{voicePresets.emotion_indicators[preset.emotion]}</div>
-              <div>{preset.name}</div>
-            </button>
-          ))}
+        <h3 className="text-sm font-semibold text-gray-700 mb-3">ElevenLabs Ses Sistemi</h3>
+        <div className="bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg p-4 border border-purple-200">
+          <div className="text-center">
+            <div className="text-2xl mb-2">🎙️</div>
+            <div className="font-medium text-gray-800">{voicePresets.presets.default.name}</div>
+            <div className="text-sm text-gray-600 mt-1">{voicePresets.presets.default.description}</div>
+            <div className="text-xs text-gray-500 mt-2">
+              Voice ID: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{voicePresets.elevenlabs_config.voice_id}</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -450,14 +513,16 @@ export default function RealtimeVoicePanel() {
       <div className="text-center mb-6">
         <button
           onClick={toggleRecording}
-          disabled={!isConnected || isProcessing}
+          disabled={!isConnected || isProcessing || isSpeaking}
           className={`w-24 h-24 rounded-full text-white font-bold text-lg transition-all duration-200 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed ${
             isRecording 
               ? 'bg-red-500 hover:bg-red-600 shadow-lg' 
+              : isSpeaking
+              ? 'bg-yellow-500 shadow-lg'
               : 'bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 shadow-lg'
           }`}
         >
-          {isRecording ? '■' : '●'}
+          {isRecording ? '■' : isSpeaking ? '🔊' : '●'}
         </button>
         <p className="mt-2 text-sm text-gray-600">
           {isRecording ? 'Kayıt yapılıyor...' : 'Kayıt başlat'}

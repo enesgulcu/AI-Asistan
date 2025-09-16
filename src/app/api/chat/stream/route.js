@@ -25,7 +25,7 @@ export async function POST(request) {
 
     // GPT konfigürasyonunu uygula
     const stream = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: finalSystemPrompt },
         ...(context ? [{ role: 'system', content: `Context: ${context}` }] : []),

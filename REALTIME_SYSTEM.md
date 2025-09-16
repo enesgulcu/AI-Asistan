@@ -73,7 +73,7 @@ const finalSystemPrompt = system_prompt || gptConfig.system_prompt
 
 // GPT parametrelerini uygula
 const stream = await openai.chat.completions.create({
-  model: 'gpt-4o-mini',
+  model: 'gpt-4o',
   messages: [{ role: 'system', content: finalSystemPrompt }],
   max_tokens: gptConfig.technical_instructions.max_tokens,
   temperature: gptConfig.technical_instructions.temperature

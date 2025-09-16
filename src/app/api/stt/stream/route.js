@@ -1,5 +1,9 @@
 import { NextRequest } from 'next/server'
-import { createClient } from '@deepgram/sdk'
+import OpenAI from 'openai'
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+})
 
 export async function POST(request) {
   try {
@@ -10,52 +14,55 @@ export async function POST(request) {
       return new Response('No audio file provided', { status: 400 })
     }
 
-    const deepgram = createClient(process.env.DEEPGRAM_API_KEY)
-    
-    // Convert File to Buffer
-    const audioBuffer = Buffer.from(await audioFile.arrayBuffer())
-    
-    // Options optimized for MP4/WebM files
-    const options = {
-      model: 'nova-2',
-      language: 'tr',
-      smart_format: true,
-      punctuate: true,
-      // Let Deepgram auto-detect encoding for container formats
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('Missing OPENAI_API_KEY')
+      return new Response('Missing OpenAI API key', { status: 500 })
     }
 
-    console.log('Deepgram options:', options)
-    console.log('Audio file type:', audioFile.type)
-    console.log('Audio buffer size:', audioBuffer.length)
+    console.log('OpenAI Whisper STT Request:', {
+      fileName: audioFile.name,
+      fileType: audioFile.type,
+      fileSize: audioFile.size
+    })
 
-    const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
-      audioBuffer,
-      options
-    )
+    // Convert File to File object for OpenAI API
+    const audioBuffer = await audioFile.arrayBuffer()
+    const audioBlob = new Blob([audioBuffer], { type: audioFile.type })
+    const audioFileForOpenAI = new File([audioBlob], audioFile.name, { 
+      type: audioFile.type 
+    })
 
-    if (error) {
-      console.error('Deepgram error:', error)
-      return new Response(JSON.stringify({ error: 'STT processing failed' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' }
-      })
-    }
+    const transcription = await openai.audio.transcriptions.create({
+      file: audioFileForOpenAI,
+      model: 'whisper-1',
+      language: 'tr', // Turkish
+      response_format: 'verbose_json',
+      temperature: 0.0
+    })
 
-    const transcript = result?.results?.channels?.[0]?.alternatives?.[0]?.transcript || ''
-    const confidence = result?.results?.channels?.[0]?.alternatives?.[0]?.confidence || 0
+    console.log('OpenAI Whisper STT Success:', {
+      text: transcription.text,
+      duration: transcription.duration,
+      language: transcription.language
+    })
 
     return new Response(JSON.stringify({
-      text: transcript,
-      confidence: confidence,
-      is_final: true
+      text: transcription.text,
+      confidence: 0.95, // Whisper doesn't provide confidence, using high default
+      is_final: true,
+      duration: transcription.duration,
+      language: transcription.language
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     })
 
   } catch (error) {
-    console.error('STT API error:', error)
-    return new Response(JSON.stringify({ error: 'Internal server error' }), {
+    console.error('OpenAI Whisper STT error:', error)
+    return new Response(JSON.stringify({ 
+      error: 'STT processing failed', 
+      details: error.message 
+    }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     })

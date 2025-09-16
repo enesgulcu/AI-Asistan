@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import OpenAI from 'openai'
+import gptConfig from '@/config/gpt-config.json'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -7,24 +8,33 @@ const openai = new OpenAI({
 
 export async function POST(request) {
   try {
-    const { prompt, context } = await request.json()
+    const { 
+      prompt, 
+      context, 
+      system_prompt, 
+      max_tokens = gptConfig.technical_instructions.max_tokens,
+      temperature = gptConfig.technical_instructions.temperature 
+    } = await request.json()
     
     if (!prompt) {
       return new Response('No prompt provided', { status: 400 })
     }
 
-    const systemPrompt = `Sen bir satış/pazarlama asistanısın. Kısa, ikna edici ve net cevap ver. Türkçe konuş. Müşteri sorularına profesyonel ve yardımcı bir şekilde yanıt ver.`
+    // Sistem prompt'unu belirleme (özel prompt varsa onu kullan, yoksa default'u kullan)
+    const finalSystemPrompt = system_prompt || gptConfig.system_prompt
 
+    // GPT konfigürasyonunu uygula
     const stream = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: finalSystemPrompt },
         ...(context ? [{ role: 'system', content: `Context: ${context}` }] : []),
         { role: 'user', content: prompt }
       ],
       stream: true,
-      max_tokens: 500,
-      temperature: 0.7,
+      max_tokens: max_tokens,
+      temperature: temperature,
+      stop: gptConfig.technical_instructions.stop_sequences
     })
 
     const encoder = new TextEncoder()

@@ -5,9 +5,9 @@
       "description": "Sıcak, samimi ve profesyonel telefon karşılama sesi",
       "elevenlabs_voice_id": "PdYVUd1CAGSXsTvZZTNn",
       "voice_settings": {
-        "stability": 0.75,
-        "similarity_boost": 0.75,
-        "style": 0.0,
+        "stability": 0.85,
+        "similarity_boost": 0.85,
+        "style": 0.3,
         "use_speaker_boost": true
       },
       "emotion": "warm_professional",

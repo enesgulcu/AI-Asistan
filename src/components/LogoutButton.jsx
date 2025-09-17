@@ -2,6 +2,10 @@
 
 import { signOut } from 'next-auth/react'
 
+/**
+ * Logout butonu bileşeni
+ * NextAuth.js signOut fonksiyonunu kullanır
+ */
 export default function LogoutButton() {
   return (
     <button
@@ -12,4 +16,3 @@ export default function LogoutButton() {
     </button>
   )
 }
-

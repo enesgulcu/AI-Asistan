@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import gptConfig from '@/config/gpt-config.json'
 import voicePresets from '@/config/voice-presets.json'
 
 export default function VoicePanel() {
+  // Ana durum yönetimi
   const [isRunning, setIsRunning] = useState(false)
   const [userText, setUserText] = useState('')
   const [assistantText, setAssistantText] = useState('')
@@ -14,76 +15,172 @@ export default function VoicePanel() {
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [testMode, setTestMode] = useState(false)
   const [debugInfo, setDebugInfo] = useState([])
-  const [currentStep, setCurrentStep] = useState('')
-  const [processSteps, setProcessSteps] = useState([])
   const [currentPreset, setCurrentPreset] = useState('default')
-  const [lastResponseAudio, setLastResponseAudio] = useState(null) // Son yanıtın ses dosyası
-  const [isReplaying, setIsReplaying] = useState(false) // Tekrar çalma durumu
-  const [fullResponseAudios, setFullResponseAudios] = useState([]) // Tüm yanıtın ses parçaları
-  const [currentResponseId, setCurrentResponseId] = useState(null) // Mevcut yanıt ID'si
-  const [lastUserSpeechTime, setLastUserSpeechTime] = useState(0) // Son kullanıcı konuşma zamanı
+  const [lastResponseAudio, setLastResponseAudio] = useState(null)
+  const [isReplaying, setIsReplaying] = useState(false)
+  const [fullResponseAudios, setFullResponseAudios] = useState([])
+  const [currentResponseId, setCurrentResponseId] = useState(null)
+  const [lastUserSpeechTime, setLastUserSpeechTime] = useState(0)
+  const [conversationHistory, setConversationHistory] = useState([])
+  const [currentConversationId, setCurrentConversationId] = useState(null)
+  const [userInfo, setUserInfo] = useState(null)
 
+  // Referanslar
   const mediaRecorderRef = useRef(null)
-
-  // Sayfa yenilendiğinde tüm geçmişi temizle
-  useEffect(() => {
-    // Component mount olduğunda tüm state'leri temizle
-    setUserText('')
-    setAssistantText('')
-    setDebugInfo([])
-    setProcessSteps([])
-    setFullResponseAudios([])
-    setLastResponseAudio(null)
-    setCurrentResponseId(null)
-    addDebugInfo('Sayfa yenilendi, tüm geçmiş temizlendi', 'info')
-  }, []) // Sadece component mount olduğunda çalış
   const audioQueueRef = useRef([])
   const isPlayingRef = useRef(false)
   const fileInputRef = useRef(null)
   const recordingTimeoutRef = useRef(null)
   const isMouseDownRef = useRef(false)
+  const operationTimers = useRef({})
+  const recognitionRef = useRef(null)
 
-  // Debug logging
-  const addDebugInfo = (message, type = 'info') => {
-    const timestamp = new Date().toLocaleTimeString()
-    setDebugInfo(prev => [...prev, { message, type, timestamp }])
-    console.log(`[${timestamp}] ${type.toUpperCase()}: ${message}`)
-  }
+  // Component mount olduğunda temizlik
+  useEffect(() => {
+    setUserText('')
+    setAssistantText('')
+    setDebugInfo([])
+    setFullResponseAudios([])
+    setLastResponseAudio(null)
+    setCurrentResponseId(null)
+    addDebugInfo('Sayfa yenilendi, tüm geçmiş temizlendi', 'info')
+    loadConversationHistory()
+  }, [])
 
-  // Zaman damgası ile detaylı debug bilgisi
-  const addDetailedDebugInfo = (message, type = 'info', details = {}) => {
+  // Gelişmiş debug sistemi
+  const addDebugInfo = useCallback((message, type = 'info', operation = null, duration = null) => {
     const now = new Date()
     const timestamp = now.toLocaleTimeString('tr-TR')
     const milliseconds = now.getMilliseconds().toString().padStart(3, '0')
     const fullTimestamp = `${timestamp}.${milliseconds}`
     
+    const durationText = duration ? ` (${duration}ms)` : ''
+    const operationText = operation ? `[${operation}] ` : ''
+    
     setDebugInfo(prev => [...prev, { 
-      message, 
+      message: `${operationText}${message}${durationText}`, 
       type, 
       timestamp: fullTimestamp,
-      details 
+      operation,
+      duration
     }])
-  }
+    
+    // Console'a detaylı debug bilgisi yazdır
+    const consoleMessage = `[${fullTimestamp}] ${operationText}${message}${durationText}`
+    
+    switch (type) {
+      case 'error':
+        console.error('🔴 VOICE PANEL ERROR:', consoleMessage)
+        break
+      case 'warning':
+        console.warn('🟡 VOICE PANEL WARNING:', consoleMessage)
+        break
+      case 'success':
+        console.log('🟢 VOICE PANEL SUCCESS:', consoleMessage)
+        break
+      case 'info':
+      default:
+        console.log('🔵 VOICE PANEL INFO:', consoleMessage)
+        break
+    }
+  }, [])
 
-  // Process steps tracking
-  const addProcessStep = (step, status = 'pending') => {
-    setProcessSteps(prev => [...prev, { step, status, timestamp: new Date().toLocaleTimeString() }])
-  }
+  // Conversation history'yi yükle
+  const loadConversationHistory = useCallback(async () => {
+    try {
+      const response = await fetch('/api/conversation')
+      if (response.ok) {
+        const data = await response.json()
+        setConversationHistory(data.conversation?.messages || [])
+        setCurrentConversationId(data.conversation?.id || null)
+        setUserInfo(data.user)
+        addDebugInfo(`Conversation history loaded: ${data.conversation?.messages?.length || 0} messages`, 'info', 'CONVERSATION')
+      }
+    } catch (error) {
+      addDebugInfo(`Failed to load conversation history: ${error.message}`, 'error', 'CONVERSATION')
+    }
+  }, [addDebugInfo])
 
-  const updateProcessStep = (step, status) => {
-    setProcessSteps(prev => prev.map(s => s.step === step ? { ...s, status } : s))
-  }
+  // Yeni mesaj ekle
+  const addMessageToHistory = useCallback(async (role, content) => {
+    try {
+      const response = await fetch('/api/conversation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId: currentConversationId,
+          role,
+          content
+        })
+      })
 
-  // Audio playback queue - Sequential playback (no overlap)
-  const playNextAudio = () => {
+      if (response.ok) {
+        const data = await response.json()
+        setCurrentConversationId(data.conversationId)
+        
+        // Local state'i güncelle
+        setConversationHistory(prev => [
+          ...prev,
+          { role: role.toUpperCase(), content, timestamp: new Date().toISOString() }
+        ])
+        
+        addDebugInfo(`Message added to history: ${role} - ${content.substring(0, 50)}...`, 'info', 'CONVERSATION')
+      }
+    } catch (error) {
+      addDebugInfo(`Failed to add message to history: ${error.message}`, 'error', 'CONVERSATION')
+    }
+  }, [currentConversationId, addDebugInfo])
+
+  // İşlem başlatma - süre takibi için
+  const startOperation = useCallback((operationName) => {
+    operationTimers.current[operationName] = Date.now()
+    addDebugInfo(`${operationName} başlatıldı`, 'info', operationName)
+  }, [addDebugInfo])
+
+  // API çağrısı takibi için özel fonksiyon
+  const trackAPICall = useCallback((apiName, endpoint, method = 'POST') => {
+    const timestamp = new Date().toLocaleTimeString('tr-TR')
+    console.log(`🚀 API CALL START: [${apiName}] ${method} ${endpoint} - ${timestamp}`)
+    addDebugInfo(`${apiName} API çağrısı başlatıldı: ${method} ${endpoint}`, 'info', apiName)
+  }, [addDebugInfo])
+
+  // API başarı takibi
+  const trackAPISuccess = useCallback((apiName, responseData = null, duration = null) => {
+    const timestamp = new Date().toLocaleTimeString('tr-TR')
+    const dataInfo = responseData ? ` - Data: ${JSON.stringify(responseData).substring(0, 100)}...` : ''
+    console.log(`✅ API SUCCESS: [${apiName}] Tamamlandı${dataInfo} - ${timestamp}`)
+    addDebugInfo(`${apiName} API başarılı`, 'success', apiName, duration)
+  }, [addDebugInfo])
+
+  // API hata takibi
+  const trackAPIError = useCallback((apiName, error, duration = null) => {
+    const timestamp = new Date().toLocaleTimeString('tr-TR')
+    console.error(`❌ API ERROR: [${apiName}] ${error.message || error} - ${timestamp}`)
+    addDebugInfo(`${apiName} API hatası: ${error.message || error}`, 'error', apiName, duration)
+  }, [addDebugInfo])
+
+  // İşlem bitirme - süre hesaplama ile
+  const endOperation = useCallback((operationName, success = true) => {
+    const startTime = operationTimers.current[operationName]
+    if (startTime) {
+      const duration = Date.now() - startTime
+      const type = success ? 'success' : 'error'
+      addDebugInfo(`${operationName} tamamlandı`, type, operationName, duration)
+      delete operationTimers.current[operationName]
+      return duration
+    }
+    return 0
+  }, [addDebugInfo])
+
+  // Ses çalma kuyruğu - pürüzsüz geçişlerle sıralı çalma
+  const playNextAudio = useCallback(() => {
     if (audioQueueRef.current.length > 0 && !isPlayingRef.current) {
       const playStartTime = Date.now()
-      const audioId = `AUDIO_${playStartTime}_${Math.random().toString(36).substr(2, 9)}`
       
       isPlayingRef.current = true
       setIsSpeaking(true)
       
-      // AI konuşurken mikrofonu tamamen durdur ve kayıt yapmayı engelle
+      // AI konuşurken mikrofonu TAMAMEN durdur ve devre dışı bırak
       if (isRecording) {
         stopRecording()
         addDebugInfo('AI konuşuyor, mikrofon durduruldu', 'info')
@@ -93,440 +190,466 @@ export default function VoicePanel() {
       isMouseDownRef.current = false
       setIsRunning(false)
       
+      // Mikrofonu tamamen devre dışı bırak (TTS çalarken)
+      const originalUserText = userText
+      setUserText('AI konuşuyor... (Mikrofon devre dışı)')
+      
+      // TTS çalarken mikrofonu FİZİKSEL olarak kapat
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop()
+        mediaRecorderRef.current = null
+        addDebugInfo('TTS çalarken MediaRecorder kapatıldı', 'info')
+      }
+      
+      // Web Speech API'yi de durdur
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+        recognitionRef.current = null
+        addDebugInfo('TTS çalarken Web Speech API durduruldu', 'info')
+      }
+      
       const audioBlob = audioQueueRef.current.shift()
       const audioUrl = URL.createObjectURL(audioBlob)
       const audio = new Audio(audioUrl)
       
-      addDetailedDebugInfo(`🔊 SES ÇALMA BAŞLADI`, 'info', {
-        audioId,
-        fileSize: `${audioBlob.size} bytes`,
-        queueRemaining: audioQueueRef.current.length,
-        startTime: new Date().toISOString()
-      });
+      // Ses kalitesi optimizasyonları
+      audio.volume = 0.9
+      audio.preload = 'auto'
+      
+      addDebugInfo(`Ses çalma başladı - ${audioBlob.size} bytes`, 'info', 'AUDIO_PLAY', 0)
       
       audio.onended = () => {
-        const playEndTime = Date.now()
-        const playDuration = playEndTime - playStartTime
-        
-        addDetailedDebugInfo(`🔊 SES ÇALMA TAMAMLANDI`, 'success', {
-          audioId,
-          playDuration: `${playDuration}ms`,
-          queueRemaining: audioQueueRef.current.length
-        });
+        const playDuration = Date.now() - playStartTime
+        addDebugInfo(`Ses çalma tamamlandı`, 'success', 'AUDIO_PLAY', playDuration)
         
         URL.revokeObjectURL(audioUrl)
         isPlayingRef.current = false
         setIsSpeaking(false)
         
-        // Hemen bir sonraki sesi çal (kesintisiz geçiş)
+        // Kullanıcı metnini geri yükle
+        setUserText(originalUserText)
+        
+        // Pürüzsüz geçiş için çok kısa bekleme (10ms)
         setTimeout(() => {
           playNextAudio()
-        }, 50)
+        }, 10)
       }
       
       audio.onerror = (error) => {
-        const playEndTime = Date.now()
-        const playDuration = playEndTime - playStartTime
-        
-        addDetailedDebugInfo(`❌ SES ÇALMA HATASI`, 'error', {
-          audioId,
-          error: error.message || 'Unknown error',
-          playDuration: `${playDuration}ms`
-        });
+        const playDuration = Date.now() - playStartTime
+        addDebugInfo(`Ses çalma hatası: ${error.message}`, 'error', 'AUDIO_PLAY', playDuration)
         
         URL.revokeObjectURL(audioUrl)
         isPlayingRef.current = false
         setIsSpeaking(false)
+        
+        // Kullanıcı metnini geri yükle
+        setUserText(originalUserText)
         playNextAudio()
       }
       
       audio.play().catch((error) => {
-        addDetailedDebugInfo(`❌ SES OYNATMA HATASI: ${error.message}`, 'error', {
-          audioId,
-          error: error.message
-        });
-      });
+        addDebugInfo(`Ses oynatma hatası: ${error.message}`, 'error', 'AUDIO_PLAY')
+        // Kullanıcı metnini geri yükle
+        setUserText(originalUserText)
+      })
     }
-  }
+  }, [isRecording, addDebugInfo, userText])
 
-  // Process TTS - Fixed order issue with detailed timing
-  async function processTTS(text) {
-    if (!text?.trim()) return;
-
-    const startTime = Date.now()
-    const ttsId = `TTS_${startTime}_${Math.random().toString(36).substr(2, 9)}`
+  // Kayıt durdurma
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop()
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop())
+      mediaRecorderRef.current = null
+    }
     
-    try {
-      setCurrentStep('TTS: Ses üretiliyor...');
-      addDetailedDebugInfo(`🎵 TTS BAŞLATILDI: "${text.trim()}"`, 'info', {
-        ttsId,
-        textLength: text.trim().length,
-        preset: currentPreset,
-        startTime: new Date().toISOString()
-      });
-      addProcessStep('TTS: Ses üretiliyor', 'in_progress');
-      setStatus('Ses üretiliyor...');
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+      recognitionRef.current = null
+    }
+    
+    setIsRecording(false)
+    setStatus('Hazır')
+  }, [])
 
+  // TTS işleme - ElevenLabs ile
+  const processTTS = useCallback(async (text) => {
+    if (!text?.trim()) return
+
+    // TTS başlamadan önce mikrofonu tamamen durdur
+    if (isRecording) {
+      stopRecording()
+      addDebugInfo('TTS başlıyor, mikrofon durduruldu', 'info', 'TTS')
+    }
+    
+    // Mouse down durumunu sıfırla
+    isMouseDownRef.current = false
+    setIsRunning(false)
+
+    startOperation('TTS')
+    addDebugInfo(`TTS başlatıldı: "${text.trim()}"`, 'info', 'TTS')
+    setStatus('Ses üretiliyor...')
+
+    try {
       // ElevenLabs preset'i al
-      const preset = voicePresets.presets['default'] // Sadece default preset kullanıyoruz
+      const preset = voicePresets.presets['default']
       
-      const apiStartTime = Date.now()
-      addDetailedDebugInfo(`📡 ELEVENLABS API ÇAĞRISI BAŞLADI`, 'info', {
-        ttsId,
-        voice_id: preset.elevenlabs_voice_id,
+      // API çağrısını takip et
+      trackAPICall('ELEVENLABS_TTS', '/api/tts/stream', 'POST')
+      console.log('📝 TTS Request Data:', {
+        text: text.trim(),
         voice_settings: preset.voice_settings,
-        provider: 'ElevenLabs'
-      });
+        preset_name: 'default'
+      })
       
-      const res = await fetch('/api/tts/stream', {
+      const response = await fetch('/api/tts/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           text: text.trim(),
           voice_settings: preset.voice_settings
         }),
-      });
+      })
 
-      const apiEndTime = Date.now()
-      const apiDuration = apiEndTime - apiStartTime
-      
-      addDetailedDebugInfo(`📡 API ÇAĞRISI TAMAMLANDI: ${res.status}`, res.ok ? 'success' : 'error', {
-        ttsId,
-        apiDuration: `${apiDuration}ms`,
-        status: res.status
-      });
-      
-      if (!res.ok) {
-        const err = await res.text();
-        addDetailedDebugInfo(`❌ API HATASI: ${err}`, 'error', {
-          ttsId,
-          error: err,
-          apiDuration: `${apiDuration}ms`
-        });
-        updateProcessStep('TTS: Ses üretiliyor', 'error');
-        return;
+      if (!response.ok) {
+        const err = await response.text()
+        trackAPIError('ELEVENLABS_TTS', new Error(err))
+        endOperation('TTS', false)
+        return
       }
 
-      const bufferStartTime = Date.now()
-      const buf = await res.arrayBuffer();
-      const blob = new Blob([buf], { type: 'audio/mpeg' });
-      const bufferEndTime = Date.now()
-      const bufferDuration = bufferEndTime - bufferStartTime
+      const buffer = await response.arrayBuffer()
+      const blob = new Blob([buffer], { type: 'audio/mpeg' })
       
       // Sıraya ekle ve çal
-      audioQueueRef.current.push(blob);
-      playNextAudio();
+      audioQueueRef.current.push(blob)
+      playNextAudio()
       
-      // Tüm yanıtın ses parçalarını kaydet (tekrar çalma için)
+      // API başarı takibi
+      const duration = endOperation('TTS', true)
+      trackAPISuccess('ELEVENLABS_TTS', { 
+        blob_size: blob.size, 
+        audio_type: 'audio/mpeg',
+        text_length: text.trim().length 
+      }, duration)
+      
+      // Yanıt ses parçalarını kaydet
       setFullResponseAudios(prev => [...prev, {
-        id: ttsId,
+        id: `TTS_${Date.now()}`,
         text: text.trim(),
         audio: blob,
         timestamp: new Date().toISOString()
-      }]);
+      }])
       
-      // Son yanıtın ses dosyasını da kaydet (geriye uyumluluk için)
-      setLastResponseAudio(blob);
+      setLastResponseAudio(blob)
       
-      const totalDuration = Date.now() - startTime
-      
-      addDetailedDebugInfo(`✅ TTS TAMAMLANDI: ${blob.size} bytes - SIRAYA EKLENDİ`, 'success', {
-        ttsId,
-        fileSize: `${blob.size} bytes`,
-        apiDuration: `${apiDuration}ms`,
-        bufferDuration: `${bufferDuration}ms`,
-        totalDuration: `${totalDuration}ms`,
-        queuePosition: audioQueueRef.current.length
-      });
-      
-      updateProcessStep('TTS: Ses üretiliyor', 'completed');
-    } catch (e) {
-      const totalDuration = Date.now() - startTime
-      addDetailedDebugInfo(`❌ TTS HATASI: ${e.message}`, 'error', {
-        ttsId,
-        error: e.message,
-        totalDuration: `${totalDuration}ms`
-      });
-      updateProcessStep('TTS: Ses üretiliyor', 'error');
-      console.error('OpenAI TTS error:', e);
+    } catch (error) {
+      endOperation('TTS', false)
+      addDebugInfo(`TTS hatası: ${error.message}`, 'error', 'TTS')
+      console.error('TTS error:', error)
     } finally {
-      setStatus('Hazır');
+      setStatus('Hazır')
     }
-  }
+  }, [isRecording, stopRecording, startOperation, endOperation, addDebugInfo, playNextAudio, trackAPICall, trackAPIError, trackAPISuccess])
 
-  // Process chat completion - Fixed TTS order
-  const processChat = async (prompt) => {
+  // Chat işleme - GPT ile
+  const processChat = useCallback(async (prompt) => {
     if (!prompt.trim()) {
-      addDebugInfo('Boş input, yanıt verilmiyor', 'warning');
-      return;
+      addDebugInfo('Boş input, yanıt verilmiyor', 'warning')
+      return
     }
 
-    // Input validation - sadece gerçek kullanıcı input'u kabul et
-    const trimmedPrompt = prompt.trim();
+    const trimmedPrompt = prompt.trim()
     if (trimmedPrompt.length < 2) {
-      addDebugInfo('Çok kısa input, yanıt verilmiyor', 'warning');
-      return;
+      addDebugInfo('Çok kısa input, yanıt verilmiyor', 'warning')
+      return
     }
 
-    // AI'nin kendi yanıtlarını tekrar işlemesini engelle
+    // AI'nin kendi yanıtlarını engelle
     const aiResponsePatterns = [
-      'Merhaba, ben Selin',
-      'Size nasıl yardımcı olabilirim',
-      'Nasılsınız',
-      'Saç Ekimi Merkezi',
-      'FUE tekniği',
-      'FUT tekniği',
-      'DHI tekniği',
-      'Sapphire FUE',
-      'foliküler ünite',
-      'saç ekimi konusunda',
-      'deneyimliyiz',
-      'başarı hikayesi',
-      'kliniğe yönlendir',
-      'randevu almak',
-      'endüşelenmeyin',
-      'güven verici'
-    ];
+      'Merhaba, ben Selin', 'Size nasıl yardımcı olabilirim', 'Nasılsınız',
+      'Şimşek Klinik', 'FUE tekniği', 'FUT tekniği', 'DHI tekniği'
+    ]
     
     const isAiResponse = aiResponsePatterns.some(pattern => 
       trimmedPrompt.toLowerCase().includes(pattern.toLowerCase())
-    );
+    )
     
     if (isAiResponse) {
-      addDebugInfo('AI kendi yanıtını tekrar işlemeye çalışıyor, engellendi', 'warning');
-      return;
+      addDebugInfo('AI kendi yanıtını tekrar işlemeye çalışıyor, engellendi', 'warning')
+      return
     }
 
-    // Yeni yanıt başladığında önceki ses parçalarını temizle
+    // Kullanıcı mesajını geçmişe ekle
+    await addMessageToHistory('user', trimmedPrompt)
+
+    // Yeni yanıt başladığında temizlik
     const responseId = Date.now().toString()
     setCurrentResponseId(responseId)
     setFullResponseAudios([])
     setLastResponseAudio(null)
 
     try {
-      setCurrentStep('Chat: AI yanıtı alınıyor...');
-      addDebugInfo(`Chat başlatılıyor: "${prompt.trim()}"`, 'info');
-      addProcessStep('Chat: AI yanıtı alınıyor', 'in_progress');
-      setStatus('AI yanıtı alınıyor...');
-      setIsProcessing(true);
-      setAssistantText('');
+      startOperation('GPT')
+      addDebugInfo(`GPT başlatıldı: "${trimmedPrompt}"`, 'info', 'GPT')
+      setStatus('AI yanıtı alınıyor...')
+      setIsProcessing(true)
+      setAssistantText('')
 
-      // Mevcut preset'i al
       const preset = voicePresets.presets[currentPreset]
       
-      // GPT config'i preset ile birleştir
-      const systemPrompt = `${gptConfig.system_prompt}\n\n${preset.style_instructions}\n\n${gptConfig.voice_guidelines.sentence_structure}`
+      // Kişisel bilgileri system prompt'a ekle
+      const personalInfo = userInfo ? `
+KULLANICI BİLGİLERİ:
+- Ad: ${userInfo.name || 'Bilinmiyor'}
+- Email: ${userInfo.email || 'Bilinmiyor'}
+- ID: ${userInfo.id || 'Bilinmiyor'}
+
+Bu bilgileri kullanarak kişisel bir bağ kur ve geçmiş konuşmaları hatırla.
+` : ''
+
+      const systemPrompt = `${gptConfig.system_prompt}\n\n${personalInfo}\n\n${preset.style_instructions}\n\n${gptConfig.voice_guidelines.sentence_structure}`
+      
+      // Conversation history'yi messages array'ine ekle
+      const historyMessages = conversationHistory.map(msg => ({
+        role: msg.role.toLowerCase(),
+        content: msg.content
+      }))
+      
+      // API çağrısını takip et
+      trackAPICall('OPENAI_GPT', '/api/chat/stream', 'POST')
+      console.log('📝 GPT Request Data:', {
+        prompt: trimmedPrompt,
+        system_prompt_length: systemPrompt.length,
+        history_messages: historyMessages.length,
+        max_tokens: gptConfig.technical_instructions.max_tokens,
+        temperature: gptConfig.technical_instructions.temperature,
+        preset: currentPreset,
+        user_info: userInfo
+      })
       
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          prompt: prompt.trim(),
+          prompt: trimmedPrompt,
           system_prompt: systemPrompt,
+          conversation_history: historyMessages,
           max_tokens: gptConfig.technical_instructions.max_tokens,
           temperature: gptConfig.technical_instructions.temperature
         })
-      });
-
-      addDebugInfo(`Chat API yanıtı: ${response.status}`, response.ok ? 'success' : 'error');
+      })
 
       if (!response.ok) {
-        const errorText = await response.text();
-        addDebugInfo(`Chat hatası: ${errorText}`, 'error');
-        updateProcessStep('Chat: AI yanıtı alınıyor', 'error');
-        throw new Error('Chat request failed');
+        const errorText = await response.text()
+        trackAPIError('OPENAI_GPT', new Error(errorText))
+        endOperation('GPT', false)
+        throw new Error('Chat request failed')
       }
 
-      // Read stream and collect full response - REALTIME STREAMING
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullResponse = '';
-      let sentenceBuffer = '';
+      // Stream okuma ve işleme
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullResponse = ''
+      let sentenceBuffer = ''
 
       const getChunkText = (payload) => {
         try {
-          const d = JSON.parse(payload);
-          return (
-            d?.text ??
-            d?.delta?.content?.[0]?.text ??
-            d?.choices?.[0]?.delta?.content?.[0]?.text ??
-            d?.choices?.[0]?.text ??
-            d?.message?.content ??
-            ''
-          );
+          const d = JSON.parse(payload)
+          return d?.text ?? d?.delta?.content?.[0]?.text ?? d?.choices?.[0]?.delta?.content?.[0]?.text ?? d?.choices?.[0]?.text ?? d?.message?.content ?? ''
         } catch {
-          return payload;
+          return payload
         }
-      };
+      }
 
-      addDebugInfo('Chat stream başlatıldı - REALTIME MODE', 'info');
+      addDebugInfo('GPT stream başlatıldı', 'info', 'GPT')
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await reader.read()
         if (done) {
-          addDebugInfo('Chat stream tamamlandı', 'success');
-          break;
+          addDebugInfo('GPT stream tamamlandı', 'success', 'GPT')
+          break
         }
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.slice(6).trim();
+          if (!line.startsWith('data: ')) continue
+          const payload = line.slice(6).trim()
 
-          if (!payload || payload === '[DONE]') continue;
+          if (!payload || payload === '[DONE]') continue
 
-          const chunk = getChunkText(payload);
-          if (!chunk) continue;
+          const chunk = getChunkText(payload)
+          if (!chunk) continue
 
-          addDebugInfo(`Chat token alındı: "${chunk}"`, 'info');
-          fullResponse += chunk;
-          setAssistantText(fullResponse);
+          fullResponse += chunk
+          setAssistantText(fullResponse)
 
-          // REALTIME: Her kelimeyi işle
-          sentenceBuffer += chunk;
+          // Realtime TTS - akıcı cümle geçişleri için iyileştirilmiş
+          sentenceBuffer += chunk
           
-          // Yöntem 1: Sadece noktalama işaretlerinde böl (en güvenli)
+          // Cümle sonu işaretlerini kontrol et (nokta, ünlem, soru işareti)
           if (/[.!?]\s/.test(sentenceBuffer)) {
-            const sentences = sentenceBuffer.split(/([.!?]\s)/);
-            let completeSentence = '';
+            const sentences = sentenceBuffer.split(/([.!?]\s)/)
+            let completeSentence = ''
             
             for (let i = 0; i < sentences.length - 1; i += 2) {
               if (sentences[i] && sentences[i + 1]) {
-                completeSentence = sentences[i].trim() + sentences[i + 1];
-                if (completeSentence && completeSentence.length > 10) { // En az 10 karakter
-                  // Hemen TTS'ye gönder
-                  addDebugInfo(`Realtime TTS: "${completeSentence}"`, 'success');
-                  updateProcessStep('Chat: AI yanıtı alınıyor', 'completed');
-                  addProcessStep('TTS: Ses üretiliyor', 'pending');
-                  await processTTS(completeSentence);
+                completeSentence = sentences[i].trim() + sentences[i + 1]
+                if (completeSentence && completeSentence.length > 10) {
+                  // Cümle başında doğal geçiş için "ve", "ama", "çünkü" gibi bağlaçları kontrol et
+                  const transitionWords = ['ve', 'ama', 'çünkü', 'sonra', 'ayrıca', 'örneğin', 'yani', 'aslında']
+                  const needsTransition = transitionWords.some(word => 
+                    completeSentence.toLowerCase().startsWith(word)
+                  )
+                  
+                  addDebugInfo(`Realtime TTS: "${completeSentence}"`, 'success', 'TTS')
+                  await processTTS(completeSentence)
                 }
               }
             }
             
-            // Kalan kısmı buffer'da tut
-            sentenceBuffer = sentences[sentences.length - 1] || '';
+            sentenceBuffer = sentences[sentences.length - 1] || ''
           }
           
-          // Yöntem 2: Çok uzun cümlelerde (150+ karakter) son virgülden böl
-          else if (sentenceBuffer.length > 150 && sentenceBuffer.includes(',')) {
-            const lastCommaIndex = sentenceBuffer.lastIndexOf(',');
-            if (lastCommaIndex > sentenceBuffer.length * 0.8) { // Son %20'de ise
-              const firstPart = sentenceBuffer.substring(0, lastCommaIndex + 1).trim();
-              const remainingPart = sentenceBuffer.substring(lastCommaIndex + 1).trim();
+          // Virgül sonrası kısa duraklamalar için de TTS yap (daha doğal konuşma)
+          else if (sentenceBuffer.includes(',') && sentenceBuffer.length > 50) {
+            const lastCommaIndex = sentenceBuffer.lastIndexOf(',')
+            if (lastCommaIndex > sentenceBuffer.length * 0.7) { // Son %30'da ise
+              const firstPart = sentenceBuffer.substring(0, lastCommaIndex + 1).trim()
+              const remainingPart = sentenceBuffer.substring(lastCommaIndex + 1).trim()
               
-              if (firstPart.length > 30) {
-                addDebugInfo(`Uzun cümle TTS: "${firstPart}"`, 'success');
-                await processTTS(firstPart);
-                sentenceBuffer = remainingPart;
-              }
-            }
-          }
-          
-          // Yöntem 3: Çok çok uzun cümlelerde (200+ karakter) orta noktadan böl
-          else if (sentenceBuffer.length > 200) {
-            const midPoint = Math.floor(sentenceBuffer.length / 2);
-            const spaceIndex = sentenceBuffer.indexOf(' ', midPoint);
-            
-            if (spaceIndex > midPoint - 20 && spaceIndex < midPoint + 20) {
-              const firstPart = sentenceBuffer.substring(0, spaceIndex).trim();
-              const remainingPart = sentenceBuffer.substring(spaceIndex).trim();
-              
-              if (firstPart.length > 50) {
-                addDebugInfo(`Çok uzun cümle TTS: "${firstPart}"`, 'success');
-                await processTTS(firstPart);
-                sentenceBuffer = remainingPart;
+              if (firstPart.length > 20) {
+                addDebugInfo(`Virgül TTS: "${firstPart}"`, 'success', 'TTS')
+                await processTTS(firstPart)
+                sentenceBuffer = remainingPart
               }
             }
           }
         }
       }
 
-      // Kalan buffer'ı da akıllı işle
+      // Kalan buffer'ı işle
       if (sentenceBuffer.trim() && sentenceBuffer.trim().length > 5) {
-        addDebugInfo(`Son TTS: "${sentenceBuffer.trim()}"`, 'success');
-        await processTTS(sentenceBuffer.trim());
-      } else if (sentenceBuffer.trim()) {
-        // Çok kısa kalan kısım varsa bir sonraki yanıtla birleştir
-        addDebugInfo(`Kısa buffer bekletiliyor: "${sentenceBuffer.trim()}"`, 'info');
+        addDebugInfo(`Son TTS: "${sentenceBuffer.trim()}"`, 'success', 'TTS')
+        await processTTS(sentenceBuffer.trim())
       }
 
-    } catch (error) {
-      addDebugInfo(`Chat error: ${error.message}`, 'error');
-      updateProcessStep('Chat: AI yanıtı alınıyor', 'error');
-      console.error('Chat error:', error);
-      setStatus('Hata: ' + error.message);
-    } finally {
-      setIsProcessing(false);
-      setCurrentStep('');
-      setStatus('Hazır');
-    }
-  };
+      const duration = endOperation('GPT', true)
+      trackAPISuccess('OPENAI_GPT', { 
+        response_length: fullResponse.length,
+        response_text: fullResponse.substring(0, 100) + '...',
+        total_chunks: fullResponse.split(' ').length
+      }, duration)
+      addDebugInfo(`GPT başarılı - ${fullResponse.length} karakter`, 'success', 'GPT', duration)
+      
+      // GPT yanıtını geçmişe ekle
+      await addMessageToHistory('assistant', fullResponse)
 
-  // Process STT with OpenAI Whisper
-  const processSTT = async (audioBlob) => {
+    } catch (error) {
+      endOperation('GPT', false)
+      addDebugInfo(`GPT hatası: ${error.message}`, 'error', 'GPT')
+      console.error('Chat error:', error)
+      setStatus('Hata: ' + error.message)
+    } finally {
+      setIsProcessing(false)
+      setStatus('Hazır')
+    }
+  }, [currentPreset, startOperation, endOperation, addDebugInfo, processTTS, trackAPICall, trackAPIError, trackAPISuccess, addMessageToHistory, conversationHistory, userInfo])
+
+  // STT işleme - OpenAI Whisper ile
+  const processSTT = useCallback(async (audioBlob) => {
     try {
-      setCurrentStep('STT: OpenAI Whisper ile konuşma işleniyor...');
-      addDebugInfo(`OpenAI Whisper STT başlatılıyor: ${audioBlob.size} bytes, ${audioBlob.type}`, 'info');
-      addProcessStep('STT: Konuşma işleniyor', 'in_progress');
-      setStatus('Konuşma işleniyor...');
+      // TTS çalıyorsa STT işlemini TAMAMEN engelle
+      if (isPlayingRef.current) {
+        addDebugInfo('TTS çalıyor, STT işlemi engellendi', 'warning', 'STT')
+        endOperation('STT', false)
+        return
+      }
+      
+      // AI konuşuyorsa STT işlemini engelle
+      if (isSpeaking) {
+        addDebugInfo('AI konuşuyor, STT işlemi engellendi', 'warning', 'STT')
+        endOperation('STT', false)
+        return
+      }
+      
+      startOperation('STT')
+      addDebugInfo(`STT başlatıldı: ${audioBlob.size} bytes`, 'info', 'STT')
+      setStatus('Konuşma işleniyor...')
       
       const formData = new FormData()
       formData.append('audio', audioBlob, 'audio.webm')
 
-      addDebugInfo('OpenAI Whisper API çağrısı yapılıyor...', 'info')
+      // API çağrısını takip et
+      trackAPICall('OPENAI_WHISPER', '/api/stt/stream', 'POST')
+      console.log('📝 STT Request Data:', {
+        audio_size: audioBlob.size,
+        audio_type: 'audio.webm',
+        form_data_keys: Array.from(formData.keys())
+      })
 
       const response = await fetch('/api/stt/stream', {
         method: 'POST',
         body: formData
       })
 
-      addDebugInfo(`OpenAI Whisper API yanıtı: ${response.status}`, response.ok ? 'success' : 'error')
-
       if (response.ok) {
         const result = await response.json()
-        addDebugInfo(`OpenAI Whisper sonucu: ${JSON.stringify(result)}`, 'success')
         
         if (result.text) {
           const currentTime = Date.now()
           const timeSinceLastUserSpeech = currentTime - lastUserSpeechTime
           
-          // Eğer AI konuşuyorsa ve son kullanıcı konuşmasından 5 saniye geçmemişse, bu muhtemelen AI'nin kendi sesi
+          // AI konuşurken gelen sesi engelle (ekstra güvenlik)
           if (isSpeaking && timeSinceLastUserSpeech < 5000) {
-            addDebugInfo('AI konuşurken gelen ses, muhtemelen AI\'nin kendi sesi - yok sayılıyor', 'warning')
-            updateProcessStep('STT: Konuşma işleniyor', 'cancelled');
+            addDebugInfo('AI konuşurken gelen ses, yok sayılıyor', 'warning', 'STT')
+            endOperation('STT', false)
             return
           }
           
-          addDebugInfo(`Metin alındı: "${result.text}"`, 'success')
+          // TTS çalıyorsa son kontrol
+          if (isPlayingRef.current) {
+            addDebugInfo('TTS çalıyor, STT sonucu yok sayılıyor', 'warning', 'STT')
+            endOperation('STT', false)
+            return
+          }
+          
+          const duration = endOperation('STT', true)
+          trackAPISuccess('OPENAI_WHISPER', { 
+            text: result.text,
+            text_length: result.text.length,
+            confidence: result.confidence || 'N/A'
+          }, duration)
+          addDebugInfo(`STT başarılı: "${result.text}"`, 'success', 'STT', duration)
+          
           setUserText(result.text)
           setLastUserSpeechTime(currentTime)
-          updateProcessStep('STT: Konuşma işleniyor', 'completed');
-          addProcessStep('Chat: AI yanıtı alınıyor', 'pending');
           await processChat(result.text)
         } else {
-          addDebugInfo('OpenAI Whisper sonucunda metin bulunamadı', 'warning')
-          updateProcessStep('STT: Konuşma işleniyor', 'error');
+          addDebugInfo('STT sonucunda metin bulunamadı', 'warning', 'STT')
+          endOperation('STT', false)
         }
       } else {
         const errorText = await response.text()
-        addDebugInfo(`OpenAI Whisper hatası: ${errorText}`, 'error')
-        updateProcessStep('STT: Konuşma işleniyor', 'error');
+        addDebugInfo(`STT API hatası: ${errorText}`, 'error', 'STT')
+        endOperation('STT', false)
         setStatus('STT hatası: ' + errorText)
       }
     } catch (error) {
-      addDebugInfo(`OpenAI Whisper error: ${error.message}`, 'error')
-      updateProcessStep('STT: Konuşma işleniyor', 'error');
-      console.error('OpenAI Whisper error:', error)
+      endOperation('STT', false)
+      addDebugInfo(`STT hatası: ${error.message}`, 'error', 'STT')
+      console.error('STT error:', error)
       setStatus('Hata: ' + error.message)
     }
-  }
+  }, [isSpeaking, lastUserSpeechTime, startOperation, endOperation, addDebugInfo, processChat, trackAPICall, trackAPISuccess, addMessageToHistory, conversationHistory, userInfo, currentPreset])
 
-  // Start recording with Web Speech API
-  const startRecording = async () => {
+  // Kayıt başlatma - Web Speech API ile
+  const startRecording = useCallback(async () => {
     try {
       if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
         addDebugInfo('Web Speech API desteklenmiyor, MediaRecorder kullanılıyor', 'warning')
@@ -534,18 +657,31 @@ export default function VoicePanel() {
         return
       }
 
-      addDebugInfo('Web Speech API ile kayıt başlatılıyor...', 'info')
+      addDebugInfo('Web Speech API ile kayıt başlatılıyor', 'info', 'RECORDING')
       setStatus('Web Speech API ile dinleniyor...')
       setIsRecording(true)
 
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       const recognition = new SpeechRecognition()
+      recognitionRef.current = recognition
       
       recognition.lang = 'tr-TR'
       recognition.continuous = true
       recognition.interimResults = true
 
       recognition.onresult = (event) => {
+        // TTS çalıyorsa Web Speech sonuçlarını engelle
+        if (isPlayingRef.current) {
+          addDebugInfo('TTS çalıyor, Web Speech sonucu engellendi', 'warning', 'RECORDING')
+          return
+        }
+        
+        // AI konuşuyorsa Web Speech sonuçlarını engelle
+        if (isSpeaking) {
+          addDebugInfo('AI konuşuyor, Web Speech sonucu engellendi', 'warning', 'RECORDING')
+          return
+        }
+        
         let finalTranscript = ''
         let interimTranscript = ''
 
@@ -560,18 +696,23 @@ export default function VoicePanel() {
 
         if (interimTranscript) {
           setUserText(interimTranscript)
-          addDebugInfo(`Interim: "${interimTranscript}"`, 'info')
         }
 
         if (finalTranscript) {
-          addDebugInfo(`Final: "${finalTranscript}"`, 'success')
+          // Son kontrol - TTS çalıyor mu?
+          if (isPlayingRef.current || isSpeaking) {
+            addDebugInfo('TTS çalıyor, Web Speech final sonucu engellendi', 'warning', 'RECORDING')
+            return
+          }
+          
+          addDebugInfo(`Web Speech sonucu: "${finalTranscript}"`, 'success', 'RECORDING')
           setUserText(finalTranscript)
           processChat(finalTranscript)
         }
       }
 
       recognition.onerror = (event) => {
-        addDebugInfo(`Web Speech hatası: ${event.error}`, 'error')
+        addDebugInfo(`Web Speech hatası: ${event.error}`, 'error', 'RECORDING')
         setStatus('Hazır')
         setIsRecording(false)
       }
@@ -579,18 +720,19 @@ export default function VoicePanel() {
       recognition.onend = () => {
         setStatus('Hazır')
         setIsRecording(false)
+        recognitionRef.current = null
       }
 
       recognition.start()
 
     } catch (error) {
-      addDebugInfo(`Recording error: ${error.message}`, 'error')
+      addDebugInfo(`Kayıt hatası: ${error.message}`, 'error', 'RECORDING')
       setStatus('Mikrofon erişim hatası: ' + error.message)
     }
-  }
+  }, [addDebugInfo, processChat])
 
-  // Fallback to MediaRecorder
-  const startRecordingWithMediaRecorder = async () => {
+  // MediaRecorder fallback
+  const startRecordingWithMediaRecorder = useCallback(async () => {
     try {
       setStatus('Mikrofon izni alınıyor...')
       
@@ -613,7 +755,19 @@ export default function VoicePanel() {
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          addDebugInfo(`MediaRecorder data: ${event.data.size} bytes`, 'info')
+          // TTS çalıyorsa MediaRecorder verilerini engelle
+          if (isPlayingRef.current) {
+            addDebugInfo('TTS çalıyor, MediaRecorder verisi engellendi', 'warning', 'RECORDING')
+            return
+          }
+          
+          // AI konuşuyorsa MediaRecorder verilerini engelle
+          if (isSpeaking) {
+            addDebugInfo('AI konuşuyor, MediaRecorder verisi engellendi', 'warning', 'RECORDING')
+            return
+          }
+          
+          addDebugInfo(`Ses verisi alındı: ${event.data.size} bytes`, 'info', 'RECORDING')
           processSTT(event.data)
         }
       }
@@ -624,166 +778,86 @@ export default function VoicePanel() {
       console.error('MediaRecorder error:', error)
       setStatus('Mikrofon erişim hatası: ' + error.message)
     }
-  }
+  }, [addDebugInfo, processSTT])
 
-  // Stop recording
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop()
-      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop())
-      mediaRecorderRef.current = null
-    }
-    setIsRecording(false)
-    setStatus('Hazır')
-  }
-
-  // Mouse events for hold-to-record
-  const handleMouseDown = () => {
+  // Mouse events - hold-to-record
+  const handleMouseDown = useCallback(() => {
+    const timestamp = new Date().toLocaleTimeString('tr-TR')
+    console.log(`👆 USER ACTION: Mikrofon butonuna basıldı - ${timestamp}`)
+    
     if (isProcessing || isSpeaking) {
+      console.warn('⚠️ USER ACTION BLOCKED: AI konuşuyor, kayıt yapılamıyor')
       addDebugInfo('AI konuşuyor, kayıt yapılamıyor', 'warning')
-      return;
+      return
     }
     
-    // Eğer zaten kayıt yapılıyorsa, yeni kayıt başlatma
+    // TTS çalıyorsa kayıt başlatma
+    if (isPlayingRef.current) {
+      console.warn('⚠️ USER ACTION BLOCKED: TTS çalıyor, kayıt yapılamıyor')
+      addDebugInfo('TTS çalıyor, kayıt yapılamıyor', 'warning')
+      return
+    }
+    
     if (isRecording) {
+      console.warn('⚠️ USER ACTION BLOCKED: Zaten kayıt yapılıyor')
       addDebugInfo('Zaten kayıt yapılıyor', 'warning')
-      return;
+      return
     }
     
-    isMouseDownRef.current = true;
-    setIsRunning(true);
-    startRecording();
+    // TTS çalıyorsa kayıt başlatma
+    if (isPlayingRef.current) {
+      console.warn('⚠️ USER ACTION BLOCKED: TTS çalıyor, kayıt başlatılamıyor')
+      addDebugInfo('TTS çalıyor, kayıt başlatılamıyor', 'warning')
+      return
+    }
     
-    // Auto-stop after 10 seconds if no speech detected
+    console.log('✅ USER ACTION SUCCESS: Kayıt başlatılıyor')
+    isMouseDownRef.current = true
+    setIsRunning(true)
+    startRecording()
+    
+    // 10 saniye sonra otomatik durdur
     recordingTimeoutRef.current = setTimeout(() => {
       if (isMouseDownRef.current) {
-        handleMouseUp();
+        console.log('⏰ AUTO STOP: 10 saniye kayıt süresi doldu')
+        handleMouseUp()
       }
-    }, 10000);
-  }
+    }, 10000)
+  }, [isProcessing, isSpeaking, isRecording, startRecording, addDebugInfo])
 
-  const handleMouseUp = () => {
-    isMouseDownRef.current = false;
+  const handleMouseUp = useCallback(() => {
+    const timestamp = new Date().toLocaleTimeString('tr-TR')
+    console.log(`👆 USER ACTION: Mikrofon butonu bırakıldı - ${timestamp}`)
+    
+    isMouseDownRef.current = false
     if (recordingTimeoutRef.current) {
-      clearTimeout(recordingTimeoutRef.current);
+      clearTimeout(recordingTimeoutRef.current)
     }
-    stopRecording();
-    setIsRunning(false);
-  }
-
-  // Test functions
-  const handleFileUpload = async (event) => {
-    const file = event.target.files[0]
-    if (file) {
-      setStatus('Dosya işleniyor...')
-      addDebugInfo(`Dosya seçildi: ${file.name}, ${file.size} bytes, ${file.type}`, 'info')
-      await processSTT(file)
+    
+    if (isRecording) {
+      console.log('✅ USER ACTION SUCCESS: Kayıt durduruluyor')
     }
-  }
+    
+    stopRecording()
+    setIsRunning(false)
+  }, [isRecording, stopRecording])
 
-  const testWithText = () => {
+  // Test fonksiyonları
+  const testWithText = useCallback(() => {
     const testText = "Merhaba, bu bir test mesajıdır. Nasılsın?"
-    addDebugInfo(`Test metni: "${testText}"`, 'info')
-    // setUserText çağrılmıyor - sadece AI'ye gönder
+    addDebugInfo(`Test metni: "${testText}"`, 'info', 'TEST')
     processChat(testText)
-  }
+  }, [addDebugInfo, processChat])
 
-  const testWebSpeech = () => {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      addDebugInfo('Web Speech API desteklenmiyor', 'error')
-      return
-    }
-
-    addDebugInfo('Web Speech API başlatılıyor...', 'info')
-    setStatus('Web Speech API ile dinleniyor...')
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    const recognition = new SpeechRecognition()
-    
-    recognition.lang = 'tr-TR'
-    recognition.continuous = false
-    recognition.interimResults = false
-
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript
-      addDebugInfo(`Web Speech sonucu: "${transcript}"`, 'success')
-      // setUserText çağrılmıyor - sadece AI'ye gönder
-      processChat(transcript)
-    }
-
-    recognition.onerror = (event) => {
-      addDebugInfo(`Web Speech hatası: ${event.error}`, 'error')
-      setStatus('Hazır')
-    }
-
-    recognition.onend = () => {
-      setStatus('Hazır')
-    }
-
-    recognition.start()
-  }
-
-  const testTTS = () => {
-    const testText = "OpenAI TTS testi: Merhaba, bu OpenAI TTS ile üretilen bir ses testidir."
-    addDebugInfo(`OpenAI TTS Test: "${testText}"`, 'info')
-    // setUserText çağrılmıyor - sadece TTS testi
+  const testTTS = useCallback(() => {
+    const testText = "ElevenLabs TTS testi: Merhaba, bu ElevenLabs ile üretilen bir ses testidir."
+    addDebugInfo(`TTS Test: "${testText}"`, 'info', 'TEST')
     processTTS(testText)
-  }
+  }, [addDebugInfo, processTTS])
 
-  // Tekrar çalma fonksiyonu - Tüm yanıtı sırayla çal
-  const replayLastResponse = () => {
-    if (fullResponseAudios.length === 0) {
-      addDebugInfo('Tekrar çalınacak ses dosyası bulunamadı', 'warning')
-      return
-    }
-
-    setIsReplaying(true)
-    addDebugInfo(`Tüm yanıt tekrar çalınıyor... (${fullResponseAudios.length} parça)`, 'info')
-    
-    // Tüm ses parçalarını sırayla çal
-    let currentIndex = 0
-    
-    const playNextPart = () => {
-      if (currentIndex >= fullResponseAudios.length) {
-        setIsReplaying(false)
-        addDebugInfo('Tüm yanıt tekrar çalma tamamlandı', 'success')
-        return
-      }
-      
-      const audioPart = fullResponseAudios[currentIndex]
-      const audioUrl = URL.createObjectURL(audioPart.audio)
-      const audio = new Audio(audioUrl)
-      
-      addDebugInfo(`Parça ${currentIndex + 1}/${fullResponseAudios.length}: "${audioPart.text}"`, 'info')
-      
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl)
-        currentIndex++
-        // Hemen bir sonraki parçayı çal (kesintisiz geçiş)
-        setTimeout(playNextPart, 50)
-      }
-      
-      audio.onerror = () => {
-        URL.revokeObjectURL(audioUrl)
-        addDebugInfo(`Parça ${currentIndex + 1} çalma hatası`, 'error')
-        currentIndex++
-        setTimeout(playNextPart, 50)
-      }
-      
-      audio.play().catch((error) => {
-        addDebugInfo(`Parça ${currentIndex + 1} oynatma hatası: ${error.message}`, 'error')
-        currentIndex++
-        setTimeout(playNextPart, 50)
-      })
-    }
-    
-    playNextPart()
-  }
-
-  // Clear all data
-  const clearAll = () => {
+  // Tüm verileri temizle
+  const clearAll = useCallback(() => {
     setDebugInfo([])
-    setProcessSteps([])
     setUserText('')
     setAssistantText('')
     setLastResponseAudio(null)
@@ -793,10 +867,12 @@ export default function VoicePanel() {
     isPlayingRef.current = false
     setIsSpeaking(false)
     setIsReplaying(false)
-  }
+    operationTimers.current = {}
+  }, [])
 
   return (
     <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
+      {/* Başlık */}
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">ElevenLabs Sesli Asistan</h2>
         <p className="text-gray-600">Mikrofonla konuşun, OpenAI GPT + Whisper + ElevenLabs TTS ile yanıtlasın</p>
@@ -820,12 +896,6 @@ export default function VoicePanel() {
           className="px-4 py-2 text-sm bg-green-100 hover:bg-green-200 text-green-800 rounded-lg transition-colors"
         >
           Metin Testi
-        </button>
-        <button
-          onClick={testWebSpeech}
-          className="px-4 py-2 text-sm bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-lg transition-colors"
-        >
-          Web Speech Testi
         </button>
         <button
           onClick={testTTS}
@@ -858,7 +928,14 @@ export default function VoicePanel() {
               ref={fileInputRef}
               type="file"
               accept="audio/*"
-              onChange={handleFileUpload}
+              onChange={(e) => {
+                const file = e.target.files[0]
+                if (file) {
+                  setStatus('Dosya işleniyor...')
+                  addDebugInfo(`Dosya seçildi: ${file.name}, ${file.size} bytes`, 'info', 'FILE_UPLOAD')
+                  processSTT(file)
+                }
+              }}
               className="hidden"
             />
             <button
@@ -868,9 +945,7 @@ export default function VoicePanel() {
             >
               📁
             </button>
-            <p className="mt-2 text-sm text-gray-600">
-              Ses dosyası yükleyin
-            </p>
+            <p className="mt-2 text-sm text-gray-600">Ses dosyası yükleyin</p>
           </div>
         ) : (
           <div>
@@ -878,7 +953,7 @@ export default function VoicePanel() {
               onMouseDown={handleMouseDown}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
-              disabled={isProcessing || isSpeaking}
+              disabled={isProcessing || isSpeaking || isPlayingRef.current}
               className={`w-24 h-24 rounded-full text-white font-bold text-lg transition-all duration-200 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed select-none ${
                 isRunning 
                   ? 'bg-red-500 hover:bg-red-600 shadow-lg' 
@@ -914,8 +989,6 @@ export default function VoicePanel() {
         </div>
       </div>
 
-      {/* Process Steps - New Beautiful Debug Panel */}
-
       {/* Text Areas */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* User Text */}
@@ -935,41 +1008,12 @@ export default function VoicePanel() {
 
         {/* Assistant Text */}
         <div>
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-gray-700 flex items-center">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center">
               <svg className="w-4 h-4 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
               Asistan (OpenAI GPT-4o)
             </h3>
-            {fullResponseAudios.length > 0 && (
-              <button
-                onClick={replayLastResponse}
-                disabled={isReplaying || isSpeaking}
-                className={`flex items-center space-x-1 px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                  isReplaying || isSpeaking
-                    ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                    : 'bg-blue-500 text-white hover:bg-blue-600 active:bg-blue-700'
-                }`}
-              >
-                {isReplaying ? (
-                  <>
-                    <svg className="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    <span>Çalıyor...</span>
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M8 5v14l11-7z"/>
-                    </svg>
-                    <span>Tekrar Çal ({fullResponseAudios.length})</span>
-                  </>
-                )}
-              </button>
-            )}
-          </div>
           <div className="bg-gray-50 rounded-lg p-3 min-h-[100px] border">
             <p className="text-gray-800 text-sm leading-relaxed">
               {assistantText || 'OpenAI GPT yanıtı burada görünecek...'}
@@ -978,64 +1022,10 @@ export default function VoicePanel() {
         </div>
       </div>
 
-      {/* Current Step */}
-      {currentStep && (
-        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-          <div className="flex items-center">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
-            <span className="text-sm text-blue-800 font-medium">{currentStep}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Process Steps - Scrollable */}
-      {processSteps.length > 0 && (
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center">
-            <svg className="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            İşlem Adımları
-          </h3>
-          <div className="bg-gray-50 rounded-lg p-4 max-h-48 overflow-y-auto border">
-            <div className="space-y-2">
-              {processSteps.map((step, index) => (
-                <div key={index} className="flex items-center p-3 bg-white rounded-lg border shadow-sm">
-                  <div className={`w-6 h-6 rounded-full flex items-center justify-center mr-3 flex-shrink-0 ${
-                    step.status === 'completed' ? 'bg-green-500' :
-                    step.status === 'in_progress' ? 'bg-blue-500 animate-pulse' :
-                    step.status === 'error' ? 'bg-red-500' :
-                    'bg-gray-400'
-                  }`}>
-                    {step.status === 'completed' ? (
-                      <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    ) : step.status === 'in_progress' ? (
-                      <div className="w-3 h-3 bg-white rounded-full animate-pulse"></div>
-                    ) : step.status === 'error' ? (
-                      <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    ) : (
-                      <div className="w-2 h-2 bg-white rounded-full"></div>
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">{step.step}</div>
-                    <div className="text-xs text-gray-500">{step.timestamp}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Debug Panel */}
+      {/* Debug Panel - Kompakt İşlem Takibi */}
       <div className="mt-6">
         <div className="flex justify-between items-center mb-2">
-          <h3 className="text-sm font-semibold text-gray-700">Debug Bilgileri</h3>
+          <h3 className="text-sm font-semibold text-gray-700">Debug Bilgileri - İşlem Takibi</h3>
           <div className="space-x-2">
             <button
               onClick={clearAll}
@@ -1056,39 +1046,30 @@ export default function VoicePanel() {
             <div className="text-gray-500">Debug bilgileri burada görünecek...</div>
           ) : (
             debugInfo.map((info, index) => (
-              <div key={index} className={`mb-2 p-2 rounded border-l-2 ${
-                info.type === 'error' ? 'text-red-400 border-red-500 bg-red-900/20' :
-                info.type === 'success' ? 'text-green-400 border-green-500 bg-green-900/20' :
-                info.type === 'warning' ? 'text-yellow-400 border-yellow-500 bg-yellow-900/20' :
-                'text-blue-400 border-blue-500 bg-blue-900/20'
+              <div key={index} className={`mb-1 py-1 px-2 rounded ${
+                info.type === 'error' ? 'text-red-400 bg-red-900/20' :
+                info.type === 'success' ? 'text-green-400 bg-green-900/20' :
+                info.type === 'warning' ? 'text-yellow-400 bg-yellow-900/20' :
+                'text-blue-400 bg-blue-900/20'
               }`}>
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="text-gray-500 text-xs mb-1">[{info.timestamp}]</div>
-                    <div className="font-medium">{info.message}</div>
-                    {info.details && (
-                      <div className="mt-2 text-xs text-gray-300 bg-black/30 p-2 rounded border">
-                        <div className="grid grid-cols-2 gap-1">
-                          {Object.entries(info.details).map(([key, value]) => (
-                            <div key={key} className="flex">
-                              <span className="text-gray-400 font-mono">{key}:</span>
-                              <span className="ml-1 text-white font-medium">
-                                {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className={`ml-2 px-2 py-1 rounded text-xs font-medium ${
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-gray-500 text-xs">[{info.timestamp}]</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
                     info.type === 'error' ? 'bg-red-500/20 text-red-300' :
                     info.type === 'success' ? 'bg-green-500/20 text-green-300' :
                     info.type === 'warning' ? 'bg-yellow-500/20 text-yellow-300' :
                     'bg-blue-500/20 text-blue-300'
                   }`}>
-                    {info.type.toUpperCase()}
+                      {info.operation || 'INFO'}
+                    </span>
+                    <span className="font-medium">{info.message}</span>
                   </div>
+                  {info.duration && (
+                    <span className="text-gray-300 text-xs font-mono bg-black/30 px-2 py-0.5 rounded">
+                      {info.duration}ms
+                    </span>
+                  )}
                 </div>
               </div>
             ))

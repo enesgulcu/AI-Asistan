@@ -1,14 +1,22 @@
 import { useField } from 'formik'
 
+/**
+ * Formik entegreli form input bileşeni
+ * Validation ve error handling ile birlikte gelir
+ */
 export default function FormInput({ label, ...props }) {
+  // Formik field hook'u - validation ve state yönetimi için
   const [field, meta] = useField(props)
 
   return (
     <div className="space-y-2">
+      {/* Label */}
       <label htmlFor={props.name} className="block text-sm font-semibold text-gray-700">
         {label}
       </label>
+      
       <div className="relative">
+        {/* Input field */}
         <input
           {...field}
           {...props}
@@ -18,6 +26,8 @@ export default function FormInput({ label, ...props }) {
               : 'border-gray-300 focus:ring-indigo-500 focus:border-indigo-500 hover:border-gray-400 focus:bg-white'
           } placeholder-gray-400 text-gray-900 text-sm`}
         />
+        
+        {/* Error icon */}
         {meta.touched && meta.error && (
           <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
             <svg className="h-5 w-5 text-red-500" viewBox="0 0 20 20" fill="currentColor">
@@ -26,6 +36,8 @@ export default function FormInput({ label, ...props }) {
           </div>
         )}
       </div>
+      
+      {/* Error message */}
       {meta.touched && meta.error && (
         <p className="text-sm text-red-600 flex items-center">
           <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">

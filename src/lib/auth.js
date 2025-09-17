@@ -3,8 +3,13 @@ import CredentialsProvider from 'next-auth/providers/credentials'
 import { prisma } from './prisma'
 import bcrypt from 'bcryptjs'
 
+/**
+ * NextAuth.js konfigürasyonu
+ * JWT tabanlı authentication sistemi
+ */
 export const authOptions = {
   providers: [
+    // Credentials provider - email/şifre ile giriş
     CredentialsProvider({
       name: 'credentials',
       credentials: {
@@ -12,10 +17,12 @@ export const authOptions = {
         password: { label: 'Password', type: 'password' }
       },
       async authorize(credentials) {
+        // Credentials validation
         if (!credentials?.email || !credentials?.password) {
           return null
         }
 
+        // Kullanıcıyı veritabanından bul
         const user = await prisma.user.findUnique({
           where: { email: credentials.email }
         })
@@ -24,12 +31,14 @@ export const authOptions = {
           return null
         }
 
+        // Şifre kontrolü
         const isPasswordValid = await bcrypt.compare(credentials.password, user.password)
 
         if (!isPasswordValid) {
           return null
         }
 
+        // Başarılı authentication - user object döndür
         return {
           id: user.id,
           name: user.name,
@@ -39,18 +48,20 @@ export const authOptions = {
     })
   ],
   session: {
-    strategy: 'jwt'
+    strategy: 'jwt' // JWT tabanlı session
   },
   pages: {
-    signIn: '/login'
+    signIn: '/login' // Özel login sayfası
   },
   callbacks: {
+    // JWT token'a user bilgilerini ekle
     async jwt({ token, user }) {
       if (user) {
         token.userId = user.id
       }
       return token
     },
+    // Session'a user bilgilerini ekle
     async session({ session, token }) {
       if (token) {
         session.user.id = token.userId
@@ -60,4 +71,5 @@ export const authOptions = {
   }
 }
 
+// NextAuth instance'ı export et
 export default NextAuth(authOptions)

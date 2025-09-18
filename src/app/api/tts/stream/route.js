@@ -20,16 +20,19 @@ export async function POST(req) {
     const { 
       text, 
       voice_settings = {
-        stability: 0.5,
-        similarity_boost: 0.5,
-        style: 0.0,
+        stability: 0.4,
+        similarity_boost: 0.9,
+        style: 0.85,
         use_speaker_boost: true
       }
     } = requestData
     
-    // Text validation
-    if (!text) {
-      return new Response('No text provided', { status: 400 })
+    // === TTS DEMO KALİTESİ: Güvenlik ve Rate Limiting ===
+    if (!text || text.length < 3) {
+      return new Response('Text too short (min 3 chars)', { status: 400 })
+    }
+    if (text.length > 2000) {
+      return new Response('Text too long (max 2000 chars)', { status: 413 })
     }
 
     // ElevenLabs API key kontrolü
@@ -38,54 +41,59 @@ export async function POST(req) {
       return new Response('Missing ElevenLabs API key', { status: 500 })
     }
 
-    console.log(`ElevenLabs TTS Request: "${text}" with voice ID: ${ELEVENLABS_VOICE_ID}`)
+    console.log(`🎵 ElevenLabs TTS Request: "${text.substring(0, 50)}..." (${text.length} chars)`)
 
-    // ElevenLabs API çağrısı - Selin karakteri için optimize edilmiş
+    // === TTS DEMO KALİTESİ: ElevenLabs Optimizasyonu ===
+    const body = {
+      text: text,
+      model_id: 'eleven_multilingual_v2', // Çok dilli model
+      voice_settings: {
+        stability: voice_settings?.stability ?? 0.4,
+        similarity_boost: voice_settings?.similarity_boost ?? 0.9,
+        style: voice_settings?.style ?? 0.85,
+        use_speaker_boost: true
+      },
+      optimize_streaming_latency: 1, // Düşük latency
+      output_format: 'mp3_44100_192' // Demo kalitesi: 44.1kHz, 192kbps
+    }
+
     const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
       method: 'POST',
       headers: {
-        'Accept': 'audio/mpeg', // MP3 formatında ses
+        'Accept': 'audio/mpeg',
         'Content-Type': 'application/json',
         'xi-api-key': ELEVENLABS_API_KEY
       },
-      body: JSON.stringify({
-        text: text,
-        model_id: 'eleven_multilingual_v2', // Çok dilli model
-        voice_settings: voice_settings
-      })
+      body: JSON.stringify(body)
     })
 
     // API response kontrolü
     if (!response.ok) {
       const errorText = await response.text()
       console.error('ElevenLabs API error:', errorText)
-      return new Response(`ElevenLabs API error: ${errorText}`, { status: response.status })
+      return new Response(`ElevenLabs Error ${response.status}: ${errorText}`, { status: 502 })
     }
 
     // Audio buffer'ı al ve response olarak döndür
-    const buffer = Buffer.from(await response.arrayBuffer())
+    const arrayBuffer = await response.arrayBuffer()
     
-    console.log(`ElevenLabs TTS Success: Generated ${buffer.length} bytes of audio with voice ID: ${ELEVENLABS_VOICE_ID}`)
+    console.log(`✅ ElevenLabs TTS Success: Generated ${arrayBuffer.byteLength} bytes (${(arrayBuffer.byteLength/1024).toFixed(1)}KB)`)
     
     // MP3 audio binary response
-    return new Response(buffer, {
+    return new Response(arrayBuffer, {
       status: 200,
       headers: {
         'Content-Type': 'audio/mpeg',
-        'Content-Length': buffer.length.toString(),
+        'Content-Length': arrayBuffer.byteLength.toString(),
         'X-Voice-ID': ELEVENLABS_VOICE_ID,
-        'X-Provider': 'ElevenLabs'
+        'X-Provider': 'ElevenLabs',
+        'X-Quality': 'mp3_44100_192',
+        'X-Latency': 'optimized'
       }
     })
 
   } catch (error) {
     console.error('ElevenLabs TTS error:', error)
-    return new Response(JSON.stringify({ 
-      error: 'TTS processing failed', 
-      details: error.message 
-    }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    })
+    return new Response(`Server Error: ${error?.message || error}`, { status: 500 })
   }
 }

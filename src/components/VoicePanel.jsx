@@ -35,6 +35,27 @@ export default function VoicePanel() {
   const operationTimers = useRef({})
   const recognitionRef = useRef(null)
 
+  // === TTS DEMO KALİTESİ: Mikro-batch Buffer ve Gapless Player ===
+  const LOG_TTS = false // ihtiyaçta true
+  let ttsBuffer = ''
+  let lastFlush = Date.now()
+  const MIN_CHARS = 220         // yeterince metin biriksin
+  const MAX_WAIT_MS = 1000      // ~1 sn
+  const SENTENCE_REGEX = /([^.?!]+[.?!]+(\s+|$))/g // cümle yakalama
+
+  // Gapless Player - Web Audio API
+  const audioCtxRef = useRef(null)
+  const queueRef = useRef([])
+  const playHeadRef = useRef(0)
+
+  // TTS Presetleri
+  const TTS_PRESETS = {
+    neutral:  { stability: 0.5, similarity: 0.9, style: 0.6 },
+    warm:     { stability: 0.4, similarity: 0.9, style: 0.85 },
+    corporate:{ stability: 0.6, similarity: 0.95, style: 0.4 },
+  }
+  let ACTIVE_PRESET = 'warm'
+
   // Component mount olduğunda temizlik
   useEffect(() => {
     setUserText('')
@@ -84,6 +105,91 @@ export default function VoicePanel() {
         break
     }
   }, [])
+
+  // === TTS DEMO KALİTESİ: Fonksiyonlar ===
+  
+  // Gapless Player - Web Audio API
+  function getCtx() {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)()
+      playHeadRef.current = audioCtxRef.current.currentTime
+    }
+    return audioCtxRef.current
+  }
+
+  async function enqueueArrayBuffer(arrayBuffer) {
+    try {
+      const ctx = getCtx()
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+      queueRef.current.push(audioBuffer)
+      scheduleIfNeeded()
+      addDebugInfo(`AudioBuffer kuyruğa eklendi: ${audioBuffer.duration.toFixed(2)}s`, 'info', 'AUDIO_QUEUE')
+    } catch (error) {
+      addDebugInfo(`AudioBuffer decode hatası: ${error.message}`, 'error', 'AUDIO_QUEUE')
+    }
+  }
+
+  function scheduleIfNeeded() {
+    const ctx = getCtx()
+    while (queueRef.current.length > 0) {
+      const buf = queueRef.current.shift()
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.connect(ctx.destination)
+
+      const overlap = 0.06 // 60ms mini-crossfade etkisi
+      const startAt = Math.max(ctx.currentTime, playHeadRef.current - overlap)
+      src.start(startAt)
+      playHeadRef.current = startAt + buf.duration
+      
+      addDebugInfo(`Gapless oynatım: ${buf.duration.toFixed(2)}s, overlap: ${overlap}s`, 'success', 'AUDIO_PLAY')
+    }
+  }
+
+  // Prosodi iyileştirme - noktalama korunur
+  function enhanceProsody(text) {
+    let t = text
+
+    // Üç nokta standardize
+    t = t.replace(/\.{3,}/g, '…')
+
+    // Uzun cümlelerde virgül sonrası minik durak için noktalı virgül/emdash tercih edilebilir
+    t = t.replace(/, ve /g, ', ve ')
+    t = t.replace(/, ama /g, ', ama ')
+
+    // Paragraf boşluğu (iki yeni satır) korunursa TTS doğal nefes verir
+    t = t.trim()
+
+    return t
+  }
+
+  // Mikro-batch TTS gönderimi
+  function pushForTTS(text) {
+    const prepared = enhanceProsody(text)
+    processTTS(prepared)
+    if (LOG_TTS) console.debug('[TTS][SEND]', prepared)
+  }
+
+  function feedTextFromGPT(chunk) {
+    if (!chunk) return
+    ttsBuffer += chunk
+
+    const enoughTime = (Date.now() - lastFlush) > MAX_WAIT_MS
+    const sentences = ttsBuffer.match(SENTENCE_REGEX) || []
+
+    // 2–3 cümleyi tek parçada gönder
+    if (sentences.length >= 2 || ttsBuffer.length > MIN_CHARS || enoughTime) {
+      // En fazla 3 cümle al
+      const batch = sentences.slice(0, 3).join(' ').trim()
+
+      if (batch.length > 10) {
+        pushForTTS(batch)
+        // buffer'dan gönderilen kısmı düş
+        ttsBuffer = ttsBuffer.slice(batch.length).trimStart()
+        lastFlush = Date.now()
+      }
+    }
+  }
 
   // Conversation history'yi yükle
   const loadConversationHistory = useCallback(async () => {
@@ -172,89 +278,7 @@ export default function VoicePanel() {
     return 0
   }, [addDebugInfo])
 
-  // Ses çalma kuyruğu - pürüzsüz geçişlerle sıralı çalma
-  const playNextAudio = useCallback(() => {
-    if (audioQueueRef.current.length > 0 && !isPlayingRef.current) {
-      const playStartTime = Date.now()
-      
-      isPlayingRef.current = true
-      setIsSpeaking(true)
-      
-      // AI konuşurken mikrofonu TAMAMEN durdur ve devre dışı bırak
-      if (isRecording) {
-        stopRecording()
-        addDebugInfo('AI konuşuyor, mikrofon durduruldu', 'info')
-      }
-      
-      // Mouse down durumunu da sıfırla
-      isMouseDownRef.current = false
-      setIsRunning(false)
-      
-      // Mikrofonu tamamen devre dışı bırak (TTS çalarken)
-      const originalUserText = userText
-      setUserText('AI konuşuyor... (Mikrofon devre dışı)')
-      
-      // TTS çalarken mikrofonu FİZİKSEL olarak kapat
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop()
-        mediaRecorderRef.current = null
-        addDebugInfo('TTS çalarken MediaRecorder kapatıldı', 'info')
-      }
-      
-      // Web Speech API'yi de durdur
-      if (recognitionRef.current) {
-        recognitionRef.current.stop()
-        recognitionRef.current = null
-        addDebugInfo('TTS çalarken Web Speech API durduruldu', 'info')
-      }
-      
-      const audioBlob = audioQueueRef.current.shift()
-      const audioUrl = URL.createObjectURL(audioBlob)
-      const audio = new Audio(audioUrl)
-      
-      // Ses kalitesi optimizasyonları
-      audio.volume = 0.9
-      audio.preload = 'auto'
-      
-      addDebugInfo(`Ses çalma başladı - ${audioBlob.size} bytes`, 'info', 'AUDIO_PLAY', 0)
-      
-      audio.onended = () => {
-        const playDuration = Date.now() - playStartTime
-        addDebugInfo(`Ses çalma tamamlandı`, 'success', 'AUDIO_PLAY', playDuration)
-        
-        URL.revokeObjectURL(audioUrl)
-        isPlayingRef.current = false
-        setIsSpeaking(false)
-        
-        // Kullanıcı metnini geri yükle
-        setUserText(originalUserText)
-        
-        // Pürüzsüz geçiş için çok kısa bekleme (10ms)
-        setTimeout(() => {
-          playNextAudio()
-        }, 10)
-      }
-      
-      audio.onerror = (error) => {
-        const playDuration = Date.now() - playStartTime
-        addDebugInfo(`Ses çalma hatası: ${error.message}`, 'error', 'AUDIO_PLAY', playDuration)
-        
-        URL.revokeObjectURL(audioUrl)
-        isPlayingRef.current = false
-        setIsSpeaking(false)
-        
-        // Kullanıcı metnini geri yükle
-        setUserText(originalUserText)
-        playNextAudio()
-      }
-      
-      audio.play().catch((error) => {
-        addDebugInfo(`Ses oynatma hatası: ${error.message}`, 'error', 'AUDIO_PLAY')
-        // Kullanıcı metnini geri yükle
-        setUserText(originalUserText)
-      })
-    }
-  }, [isRecording, addDebugInfo, userText])
+  // === TTS DEMO KALİTESİ: Eski playNextAudio kaldırıldı - Web Audio API kullanılıyor ===
 
   // Kayıt durdurma
   const stopRecording = useCallback(() => {
@@ -319,12 +343,13 @@ export default function VoicePanel() {
         return
       }
 
-      const buffer = await response.arrayBuffer()
-      const blob = new Blob([buffer], { type: 'audio/mpeg' })
+      const arrayBuffer = await response.arrayBuffer()
       
-      // Sıraya ekle ve çal
-      audioQueueRef.current.push(blob)
-      playNextAudio()
+      // Web Audio API ile gapless oynatım
+      await enqueueArrayBuffer(arrayBuffer)
+      
+      // Blob'u da kaydet (eski sistem için)
+      const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' })
       
       // API başarı takibi
       const duration = endOperation('TTS', true)
@@ -351,7 +376,7 @@ export default function VoicePanel() {
     } finally {
       setStatus('Hazır')
     }
-  }, [isRecording, stopRecording, startOperation, endOperation, addDebugInfo, playNextAudio, trackAPICall, trackAPIError, trackAPISuccess])
+  }, [isRecording, stopRecording, startOperation, endOperation, addDebugInfo, trackAPICall, trackAPIError, trackAPISuccess, enqueueArrayBuffer])
 
   // Chat işleme - GPT ile
   const processChat = useCallback(async (prompt) => {
@@ -489,54 +514,16 @@ Bu bilgileri kullanarak kişisel bir bağ kur ve geçmiş konuşmaları hatırla
           fullResponse += chunk
           setAssistantText(fullResponse)
 
-          // Realtime TTS - akıcı cümle geçişleri için iyileştirilmiş
-          sentenceBuffer += chunk
-          
-          // Cümle sonu işaretlerini kontrol et (nokta, ünlem, soru işareti)
-          if (/[.!?]\s/.test(sentenceBuffer)) {
-            const sentences = sentenceBuffer.split(/([.!?]\s)/)
-            let completeSentence = ''
-            
-            for (let i = 0; i < sentences.length - 1; i += 2) {
-              if (sentences[i] && sentences[i + 1]) {
-                completeSentence = sentences[i].trim() + sentences[i + 1]
-                if (completeSentence && completeSentence.length > 10) {
-                  // Cümle başında doğal geçiş için "ve", "ama", "çünkü" gibi bağlaçları kontrol et
-                  const transitionWords = ['ve', 'ama', 'çünkü', 'sonra', 'ayrıca', 'örneğin', 'yani', 'aslında']
-                  const needsTransition = transitionWords.some(word => 
-                    completeSentence.toLowerCase().startsWith(word)
-                  )
-                  
-                  addDebugInfo(`Realtime TTS: "${completeSentence}"`, 'success', 'TTS')
-                  await processTTS(completeSentence)
-                }
-              }
-            }
-            
-            sentenceBuffer = sentences[sentences.length - 1] || ''
-          }
-          
-          // Virgül sonrası kısa duraklamalar için de TTS yap (daha doğal konuşma)
-          else if (sentenceBuffer.includes(',') && sentenceBuffer.length > 50) {
-            const lastCommaIndex = sentenceBuffer.lastIndexOf(',')
-            if (lastCommaIndex > sentenceBuffer.length * 0.7) { // Son %30'da ise
-              const firstPart = sentenceBuffer.substring(0, lastCommaIndex + 1).trim()
-              const remainingPart = sentenceBuffer.substring(lastCommaIndex + 1).trim()
-              
-              if (firstPart.length > 20) {
-                addDebugInfo(`Virgül TTS: "${firstPart}"`, 'success', 'TTS')
-                await processTTS(firstPart)
-                sentenceBuffer = remainingPart
-              }
-            }
-          }
+          // === TTS DEMO KALİTESİ: Mikro-batch Buffer ===
+          feedTextFromGPT(chunk)
         }
       }
 
-      // Kalan buffer'ı işle
-      if (sentenceBuffer.trim() && sentenceBuffer.trim().length > 5) {
-        addDebugInfo(`Son TTS: "${sentenceBuffer.trim()}"`, 'success', 'TTS')
-        await processTTS(sentenceBuffer.trim())
+      // === TTS DEMO KALİTESİ: Son Buffer Flush ===
+      if (ttsBuffer.trim() && ttsBuffer.trim().length > 5) {
+        addDebugInfo(`Son TTS Flush: "${ttsBuffer.trim()}"`, 'success', 'TTS')
+        pushForTTS(ttsBuffer.trim())
+        ttsBuffer = '' // Buffer'ı temizle
       }
 
       const duration = endOperation('GPT', true)
